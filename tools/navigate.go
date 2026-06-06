@@ -453,6 +453,11 @@ func enrichBlockTree(blocks []types.BlockEntity, maxDepth, currentDepth int) []t
 	enriched := make([]types.EnrichedBlock, 0, len(blocks))
 	for _, b := range blocks {
 		eb := enrichBlock(b)
+		// enrichBlock copies b wholesale, so eb.BlockEntity.Children already
+		// holds the raw children. Rebuild that slice from the recursively
+		// enriched (and depth-truncated) children rather than appending to it,
+		// which would duplicate every child.
+		eb.BlockEntity.Children = nil
 		if len(b.Children) > 0 {
 			childEnriched := enrichBlockTree(b.Children, maxDepth, currentDepth+1)
 			for _, ce := range childEnriched {

@@ -60,8 +60,8 @@ func main() {
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	readOnly := fs.Bool("read-only", false, "Disable all write operations")
-	backendType := fs.String("backend", "", "Backend type: logseq (default) or obsidian")
-	vaultPath := fs.String("vault", "", "Path to Obsidian vault (required for obsidian backend)")
+	backendType := fs.String("backend", "", "Backend type: logseq (default), logseq-offline, or obsidian")
+	vaultPath := fs.String("vault", "", "Path to vault/graph (required for obsidian and logseq-offline backends)")
 	dailyFolder := fs.String("daily-folder", "daily notes", "Daily notes subfolder name (obsidian only)")
 	includeHidden := fs.Bool("include-hidden", false, "Index directories starting with '.' (obsidian only, .git is always skipped)")
 	httpAddr := fs.String("http", "", "HTTP address to listen on (e.g. :8080). Uses streamable HTTP transport instead of stdio.")
@@ -89,31 +89,25 @@ func runServe(args []string) {
 		}
 		vc := vault.New(vp, vault.WithDailyFolder(*dailyFolder), vault.WithIncludeHidden(*includeHidden))
 		defer vc.Close()
-
-		lb := backend.NewLazyBackend(vc)
-		go func() {
-			if err := vc.Load(); err != nil {
-				fmt.Fprintf(os.Stderr, "graphthulhu: failed to load vault: %v\n", err)
-				lb.MarkFailed(err)
-				return
-			}
-			vc.BuildBacklinks()
-			if err := vc.Watch(); err != nil {
-				fmt.Fprintf(os.Stderr, "graphthulhu: failed to start watcher: %v\n", err)
-				lb.MarkFailed(err)
-				return
-			}
-			fmt.Fprintf(os.Stderr, "graphthulhu: vault indexed and ready\n")
-			lb.MarkReady()
-		}()
-
-		b = lb
+		b = startVaultBackend(vc)
+	case "logseq-offline":
+		vp := *vaultPath
+		if vp == "" {
+			vp = os.Getenv("LOGSEQ_GRAPH_PATH")
+		}
+		if vp == "" {
+			fmt.Fprintf(os.Stderr, "graphthulhu: --vault or LOGSEQ_GRAPH_PATH required for logseq-offline backend\n")
+			os.Exit(1)
+		}
+		vc := vault.NewLogseq(vp, vault.WithIncludeHidden(*includeHidden))
+		defer vc.Close()
+		b = startVaultBackend(vc)
 	case "logseq":
 		lsClient := client.New("", "")
 		checkGraphVersionControl(lsClient)
 		b = lsClient
 	default:
-		fmt.Fprintf(os.Stderr, "graphthulhu: unknown backend %q (use logseq or obsidian)\n", bt)
+		fmt.Fprintf(os.Stderr, "graphthulhu: unknown backend %q (use logseq, logseq-offline or obsidian)\n", bt)
 		os.Exit(1)
 	}
 
@@ -138,6 +132,29 @@ func runServe(args []string) {
 	}
 }
 
+// startVaultBackend wraps a vault.Client in a LazyBackend and indexes it in the
+// background, so the MCP handshake completes immediately on large graphs. Shared
+// by the obsidian and logseq-offline backends. The caller owns vc.Close().
+func startVaultBackend(vc *vault.Client) backend.Backend {
+	lb := backend.NewLazyBackend(vc)
+	go func() {
+		if err := vc.Load(); err != nil {
+			fmt.Fprintf(os.Stderr, "graphthulhu: failed to load vault: %v\n", err)
+			lb.MarkFailed(err)
+			return
+		}
+		vc.BuildBacklinks()
+		if err := vc.Watch(); err != nil {
+			fmt.Fprintf(os.Stderr, "graphthulhu: failed to start watcher: %v\n", err)
+			lb.MarkFailed(err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "graphthulhu: vault indexed and ready\n")
+		lb.MarkReady()
+	}()
+	return lb
+}
+
 func printUsage() {
 	fmt.Fprintf(os.Stderr, "graphthulhu %s — Knowledge graph MCP server & CLI\n\n", version)
 	fmt.Fprintf(os.Stderr, "Usage:\n")
@@ -148,8 +165,9 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  graphthulhu search QUERY         Full-text search across the graph\n")
 	fmt.Fprintf(os.Stderr, "  graphthulhu version              Print version\n")
 	fmt.Fprintf(os.Stderr, "\nServe flags:\n")
-	fmt.Fprintf(os.Stderr, "  --backend logseq|obsidian       Backend type (default: logseq)\n")
-	fmt.Fprintf(os.Stderr, "  --vault PATH                    Obsidian vault path\n")
+	fmt.Fprintf(os.Stderr, "  --backend logseq|logseq-offline|obsidian\n")
+	fmt.Fprintf(os.Stderr, "                                  Backend type (default: logseq)\n")
+	fmt.Fprintf(os.Stderr, "  --vault PATH                    Vault/graph path (obsidian, logseq-offline)\n")
 	fmt.Fprintf(os.Stderr, "  --daily-folder NAME             Daily notes folder (default: daily notes)\n")
 	fmt.Fprintf(os.Stderr, "  --include-hidden                Index directories starting with '.' (obsidian only)\n")
 	fmt.Fprintf(os.Stderr, "  --read-only                     Disable write operations\n")
@@ -159,6 +177,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "             LOGSEQ_API_TOKEN\n")
 	fmt.Fprintf(os.Stderr, "             GRAPHTHULHU_BACKEND   Backend type\n")
 	fmt.Fprintf(os.Stderr, "             OBSIDIAN_VAULT_PATH   Obsidian vault path\n")
+	fmt.Fprintf(os.Stderr, "             LOGSEQ_GRAPH_PATH     Offline Logseq graph path\n")
 }
 
 // checkGraphVersionControl warns on stderr if the Logseq graph is not git-controlled.

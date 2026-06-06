@@ -65,6 +65,7 @@ type Client struct {
 	backlinks     map[string][]backlink   // lowercase target → backlinks
 	blockIndex    map[string]*blockLookup // uuid → block + page
 	searchIndex   *SearchIndex            // inverted index for full-text search
+	format        format                  // on-disk syntax: parse + serialize + layout
 	mu            sync.RWMutex            // protects all maps above
 	watcher       *fsnotify.Watcher       // file system watcher
 
@@ -99,8 +100,9 @@ func WithIncludeHidden(include bool) Option {
 	return func(c *Client) { c.includeHidden = include }
 }
 
-// New creates a new Obsidian vault client. Call Load() to index the vault.
-func New(vaultPath string, opts ...Option) *Client {
+// newClient builds a Client with all format-agnostic machinery initialized.
+// Callers set c.format before returning to the user.
+func newClient(vaultPath string, opts ...Option) *Client {
 	c := &Client{
 		vaultPath:   vaultPath,
 		dailyFolder: "daily notes",
@@ -112,6 +114,24 @@ func New(vaultPath string, opts ...Option) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
+	return c
+}
+
+// New creates a new Obsidian vault client. Call Load() to index the vault.
+func New(vaultPath string, opts ...Option) *Client {
+	c := newClient(vaultPath, opts...)
+	c.format = &obsidianFormat{dailyFolder: c.dailyFolder}
+	return c
+}
+
+// NewLogseq creates a client for an offline Logseq graph: the same in-memory
+// index, watcher, and search machinery as New, but reading/writing Logseq
+// outliner syntax (pages/ + journals/, `- ` bullets, `id::` block IDs). The
+// journal date format is read from logseq/config.edn under vaultPath. Call
+// Load() to index the graph.
+func NewLogseq(vaultPath string, opts ...Option) *Client {
+	c := newClient(vaultPath, opts...)
+	c.format = newLogseqFormat(vaultPath)
 	return c
 }
 
@@ -165,35 +185,9 @@ func (c *Client) indexFileCore(relPath, content string, info os.FileInfo) {
 }
 
 // parseFile creates a cachedPage from file content (no locking needed).
+// Format-specific parsing is delegated to the configured format strategy.
 func (c *Client) parseFile(relPath, content string, info os.FileInfo) *cachedPage {
-	name := strings.TrimSuffix(filepath.ToSlash(relPath), ".md")
-	lowerName := strings.ToLower(name)
-
-	props, body := parseFrontmatter(content)
-
-	isJournal := false
-	if c.dailyFolder != "" {
-		prefix := strings.ToLower(c.dailyFolder) + "/"
-		isJournal = strings.HasPrefix(lowerName, prefix)
-	}
-
-	entity := types.PageEntity{
-		Name:         name,
-		OriginalName: name,
-		Properties:   props,
-		Journal:      isJournal,
-		CreatedAt:    info.ModTime().UnixMilli(),
-		UpdatedAt:    info.ModTime().UnixMilli(),
-	}
-
-	blocks := parseMarkdownBlocks(relPath, body)
-
-	return &cachedPage{
-		entity:    entity,
-		lowerName: lowerName,
-		filePath:  relPath,
-		blocks:    blocks,
-	}
+	return c.format.Parse(relPath, content, info)
 }
 
 // applyPageIndex stores a parsed page into all indices. Caller must hold c.mu for write.
@@ -508,7 +502,7 @@ func (c *Client) CreatePage(_ context.Context, name string, properties map[strin
 		return nil, fmt.Errorf("page already exists: %s", name)
 	}
 
-	relPath := name + ".md"
+	relPath := c.format.PageFilePath(name)
 	absPath, err := c.safePath(relPath)
 	if err != nil {
 		return nil, err
@@ -519,10 +513,7 @@ func (c *Client) CreatePage(_ context.Context, name string, properties map[strin
 		return nil, fmt.Errorf("create directory: %w", err)
 	}
 
-	var content string
-	if len(properties) > 0 {
-		content = renderFrontmatter(properties)
-	}
+	content := c.format.NewPageContent(properties)
 
 	if err := atomicWrite(absPath, content); err != nil {
 		return nil, fmt.Errorf("write page: %w", err)
@@ -552,7 +543,7 @@ func (c *Client) AppendBlockInPage(_ context.Context, page string, content strin
 	var absPath string
 	var relPath string
 	if !exists {
-		relPath = page + ".md"
+		relPath = c.format.PageFilePath(page)
 		var err error
 		absPath, err = c.safePath(relPath)
 		if err != nil {
@@ -582,13 +573,11 @@ func (c *Client) AppendBlockInPage(_ context.Context, page string, content strin
 		return nil, fmt.Errorf("read file: %w", err)
 	}
 
-	blockUUID, cleanContent := extractUUID(content)
+	blockUUID, cleanContent := c.format.ExtractID(content)
 	if blockUUID == "" {
 		blockUUID = generateRandomUUID()
-		content = embedUUID(cleanContent, blockUUID)
-	} else {
-		content = cleanContent
 	}
+	content = c.format.RenderBlock(cleanContent, blockUUID)
 
 	newContent := string(existing)
 	if newContent != "" && !strings.HasSuffix(newContent, "\n") {
@@ -626,17 +615,15 @@ func (c *Client) PrependBlockInPage(_ context.Context, page string, content stri
 	lowerName := strings.ToLower(page)
 	cached, exists := c.pages[lowerName]
 
-	blockUUID, cleanContent := extractUUID(content)
+	blockUUID, cleanContent := c.format.ExtractID(content)
 	if blockUUID == "" {
 		blockUUID = generateRandomUUID()
-		content = embedUUID(cleanContent, blockUUID)
-	} else {
-		content = cleanContent
 	}
+	content = c.format.RenderBlock(cleanContent, blockUUID)
 
 	var absPath string
 	if !exists {
-		relPath := page + ".md"
+		relPath := c.format.PageFilePath(page)
 		var err error
 		absPath, err = c.safePath(relPath)
 		if err != nil {
@@ -670,13 +657,8 @@ func (c *Client) PrependBlockInPage(_ context.Context, page string, content stri
 		return nil, fmt.Errorf("read file: %w", err)
 	}
 
-	props, body := parseFrontmatter(string(existing))
-	var newContent string
-	if props != nil {
-		newContent = renderFrontmatter(props) + content + "\n" + body
-	} else {
-		newContent = content + "\n" + string(existing)
-	}
+	head, body := c.format.SplitLeadingProperties(string(existing))
+	newContent := head + content + "\n" + body
 
 	if err := atomicWrite(absPath, newContent); err != nil {
 		return nil, fmt.Errorf("write file: %w", err)
@@ -727,23 +709,20 @@ func (c *Client) InsertBlock(_ context.Context, srcBlock any, content string, op
 	}
 	insertPos := idx + len(parentContent)
 
-	childContent := content
-	if lvl := headingLevel(strings.SplitN(parentContent, "\n", 2)[0]); lvl > 0 && lvl < 6 {
-		if headingLevel(strings.SplitN(content, "\n", 2)[0]) == 0 {
-			prefix := strings.Repeat("#", lvl+1) + " "
-			childContent = prefix + content
-		}
+	// The parent's raw on-disk line carries the indentation/heading context the
+	// format needs to nest the child correctly.
+	parentLine := fileStr[strings.LastIndexByte(fileStr[:idx], '\n')+1:]
+	if nl := strings.IndexByte(parentLine, '\n'); nl >= 0 {
+		parentLine = parentLine[:nl]
 	}
 
-	blockUUID, cleanContent := extractUUID(childContent)
+	blockUUID, cleanContent := c.format.ExtractID(content)
 	if blockUUID == "" {
 		blockUUID = generateRandomUUID()
-		childContent = embedUUID(cleanContent, blockUUID)
-	} else {
-		childContent = cleanContent
 	}
+	rendered := c.format.RenderChild(parentLine, cleanContent, blockUUID)
 
-	newContent := fileStr[:insertPos] + "\n" + childContent + fileStr[insertPos:]
+	newContent := fileStr[:insertPos] + rendered + fileStr[insertPos:]
 
 	if err := atomicWrite(absPath, newContent); err != nil {
 		return nil, fmt.Errorf("write file: %w", err)
@@ -753,12 +732,8 @@ func (c *Client) InsertBlock(_ context.Context, srcBlock any, content string, op
 	c.indexFileCore(cached.filePath, newContent, info)
 	c.rebuildLinksLocked()
 
-	cached = c.pages[lowerName]
-	if cached != nil {
-		block := findBlockByContent(cached.blocks, childContent)
-		if block != nil {
-			return block, nil
-		}
+	if lk, ok := c.blockIndex[blockUUID]; ok {
+		return lk.block, nil
 	}
 
 	return &types.BlockEntity{UUID: blockUUID, Content: cleanContent}, nil
@@ -794,17 +769,17 @@ func (c *Client) UpdateBlock(_ context.Context, uuid string, content string, opt
 
 	// The file might have the UUID embedded, so we need to search for it
 	// We'll look for the old content with or without UUID comment
-	oldContentWithUUID := embedUUID(oldContent, uuid)
+	oldContentWithUUID := c.format.EmbedID(oldContent, uuid)
 
 	var oldInFile, newInFile string
 	if strings.Contains(fileStr, oldContentWithUUID) {
 		// File has UUID embedded
 		oldInFile = oldContentWithUUID
 		// Check if new content has a UUID, preserve the original UUID
-		providedUUID, cleanContent := extractUUID(content)
+		providedUUID, cleanContent := c.format.ExtractID(content)
 		if providedUUID == "" || providedUUID == uuid {
 			// No UUID provided or same UUID, preserve the block's UUID
-			newInFile = embedUUID(cleanContent, uuid)
+			newInFile = c.format.EmbedID(cleanContent, uuid)
 		} else {
 			// Different UUID provided, use the new content as-is
 			newInFile = content
@@ -814,10 +789,10 @@ func (c *Client) UpdateBlock(_ context.Context, uuid string, content string, opt
 		oldInFile = oldContent
 		// Add UUID to new content
 		cleanContent := content
-		if _, extractedClean := extractUUID(content); extractedClean != content {
+		if _, extractedClean := c.format.ExtractID(content); extractedClean != content {
 			cleanContent = extractedClean
 		}
-		newInFile = embedUUID(cleanContent, uuid)
+		newInFile = c.format.EmbedID(cleanContent, uuid)
 	} else {
 		return fmt.Errorf("block content not found in file (may have been modified externally)")
 	}
@@ -862,7 +837,7 @@ func (c *Client) RemoveBlock(_ context.Context, uuid string) error {
 	oldContent := lookup.block.Content
 	fileStr := string(existing)
 
-	oldContentWithUUID := embedUUID(oldContent, uuid)
+	oldContentWithUUID := c.format.EmbedID(oldContent, uuid)
 	var newContent string
 
 	if strings.Contains(fileStr, oldContentWithUUID+"\n") {
@@ -948,7 +923,7 @@ func (c *Client) RenamePage(_ context.Context, oldName, newName string) error {
 	if err != nil {
 		return err
 	}
-	newRelPath := newName + ".md"
+	newRelPath := c.format.PageFilePath(newName)
 	newAbsPath, err := c.safePath(newRelPath)
 	if err != nil {
 		return err
@@ -1200,22 +1175,6 @@ func lastBlock(blocks []types.BlockEntity) *types.BlockEntity {
 		}
 	}
 	return last
-}
-
-// findBlockByContent searches for a block with matching content.
-func findBlockByContent(blocks []types.BlockEntity, content string) *types.BlockEntity {
-	for i := range blocks {
-		if blocks[i].Content == content {
-			return &blocks[i]
-		}
-		if len(blocks[i].Children) > 0 {
-			found := findBlockByContent(blocks[i].Children, content)
-			if found != nil {
-				return found
-			}
-		}
-	}
-	return nil
 }
 
 // --- Optional search interfaces ---
