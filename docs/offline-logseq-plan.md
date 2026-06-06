@@ -1,6 +1,6 @@
 # Offline Logseq Mode — Implementation Plan
 
-Status: **planned, not started**
+Status: **in progress** — build-order steps 1–5 done; 6 (flashcards), 7 (whiteboards), 8 (testdata + docs) remain.
 
 A third backend, selectable via `--backend logseq-offline` (or
 `GRAPHTHULHU_BACKEND=logseq-offline`), that reads/writes a Logseq graph directly
@@ -111,15 +111,22 @@ surface Logseq-only tools without faking Datalog.
 
 ## Build order
 
-1. Extract the `format` strategy from `vault.Client`; preserve Obsidian behavior
+1. ✅ Extract the `format` strategy from `vault.Client`; preserve Obsidian behavior
    exactly (green tests gate this — pure refactor, no behavior change).
-2. `logseqFormat` parser: tab-indent outliner tree, `id::` extraction, page/block
+2. ✅ `logseqFormat` parser: tab-indent outliner tree, `id::` extraction, page/block
    `key:: value` props, `pages/`+`journals/` layout, minimal `config.edn` read,
    `___` namespace decoding.
-3. `logseqFormat` serializer + adapt write methods to outliner output.
-4. Wire `--backend logseq-offline` into the `main.go:75` switch, reusing
-   `LazyBackend` exactly as Obsidian does (`main.go:84-104`).
-5. Capability-interface split + `get_references` offline.
+3. ✅ `logseqFormat` serializer + adapt write methods to outliner output.
+4. ✅ Wire `--backend logseq-offline` into the `main.go` switch, reusing
+   `LazyBackend` as Obsidian does. (Also fixed a pre-existing duplicate-child bug
+   in `tools/navigate.go:enrichBlockTree`.)
+5. ✅ Capability-interface split + `get_references` offline. Added
+   `backend.ReferenceSearcher` (+ `ReferenceResult`); `LazyLogseqBackend` wrapper
+   exposes Logseq-only capabilities so the gate distinguishes offline-Logseq from
+   Obsidian (both are `*vault.Client`); live Logseq client implements it via the
+   existing DataScript pull; offline scans the block index. `get_references` now
+   gates on `ReferenceSearcher`, `query_datalog` stays on `HasDataScript`. UUID
+   input validated before query interpolation.
 6. Flashcards (`FlashcardProvider`).
 7. Whiteboards (`WhiteboardProvider`) — sequenced last so a regression here can't
    block the rest.

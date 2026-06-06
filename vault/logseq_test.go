@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -315,6 +316,53 @@ func TestLogseqSerializeRoundTrip(t *testing.T) {
 	}
 	if page.blocks[0].Children[0].UUID != childID {
 		t.Errorf("child UUID = %q, want %q", page.blocks[0].Children[0].UUID, childID)
+	}
+}
+
+func TestLogseqGetBlockReferences(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Target block carries a stable id::; two other blocks reference it via
+	// ((uuid)); a third block (and the target itself) do not.
+	target := "6543abcd-1234-5678-9abc-def012345678"
+	notes := "- Target block\n  id:: " + target + "\n- See ((" + target + ")) for details\n- Unrelated block\n"
+	other := "- Also relates to ((" + target + "))\n"
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Notes.md"), []byte(notes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Other.md"), []byte(other), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	refs, err := c.GetBlockReferences(context.Background(), target)
+	if err != nil {
+		t.Fatalf("GetBlockReferences: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 references, got %d: %+v", len(refs), refs)
+	}
+	// Sorted by page then content: Notes before Other.
+	if refs[0].Page != "Notes" || !strings.Contains(refs[0].Content, "See ((") {
+		t.Errorf("ref[0] = %+v", refs[0])
+	}
+	if refs[1].Page != "Other" || !strings.Contains(refs[1].Content, "Also relates") {
+		t.Errorf("ref[1] = %+v", refs[1])
+	}
+
+	// A UUID nobody references yields no results, not an error.
+	none, err := c.GetBlockReferences(context.Background(), "00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		t.Fatalf("GetBlockReferences(none): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("expected 0 references, got %d", len(none))
 	}
 }
 

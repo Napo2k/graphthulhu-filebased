@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -444,6 +445,43 @@ func (c *Client) GetBlock(_ context.Context, uuid string, opts ...map[string]any
 	block := *lookup.block
 	block.Page = &types.PageRef{Name: lookup.page}
 	return &block, nil
+}
+
+// Compile-time check: *Client resolves block references for offline Logseq.
+var _ backend.ReferenceSearcher = (*Client)(nil)
+
+// GetBlockReferences returns every block whose content references uuid via
+// ((uuid)), scanning the in-memory block index. Implements
+// backend.ReferenceSearcher. This is format-agnostic — it relies only on the
+// parser's ((ref)) extraction — but is only wired up for the Logseq backend,
+// which is the format that uses block references. Results are sorted by page
+// then content for stable output.
+func (c *Client) GetBlockReferences(_ context.Context, uuid string) ([]backend.ReferenceResult, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var results []backend.ReferenceResult
+	for _, lookup := range c.blockIndex {
+		refs := parser.Parse(lookup.block.Content).BlockReferences
+		for _, ref := range refs {
+			if ref == uuid {
+				results = append(results, backend.ReferenceResult{
+					UUID:    lookup.block.UUID,
+					Content: lookup.block.Content,
+					Page:    lookup.page,
+				})
+				break
+			}
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Page != results[j].Page {
+			return results[i].Page < results[j].Page
+		}
+		return results[i].Content < results[j].Content
+	})
+	return results, nil
 }
 
 func (c *Client) GetPageLinkedReferences(_ context.Context, nameOrID any) (json.RawMessage, error) {

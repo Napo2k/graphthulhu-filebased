@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/skridlevsky/graphthulhu/backend"
 	"github.com/skridlevsky/graphthulhu/types"
 )
 
@@ -299,3 +300,48 @@ func (c *Client) Ping(ctx context.Context) error {
 // HasDataScript marks the Logseq client as supporting DataScript queries.
 // Implements backend.HasDataScript.
 func (c *Client) HasDataScript() {}
+
+// Compile-time check: *Client resolves block references.
+var _ backend.ReferenceSearcher = (*Client)(nil)
+
+// GetBlockReferences returns every block that references uuid via ((uuid)),
+// using a DataScript pull over :block/refs. Implements backend.ReferenceSearcher.
+// uuid is interpolated into the query, so callers must validate it is a
+// well-formed UUID first (the get_references tool does).
+func (c *Client) GetBlockReferences(ctx context.Context, uuid string) ([]backend.ReferenceResult, error) {
+	query := fmt.Sprintf(`[:find (pull ?b [:block/uuid :block/content {:block/page [:block/name]}])
+		:where
+		[?b :block/refs ?ref]
+		[?ref :block/uuid #uuid "%s"]]`, uuid)
+
+	raw, err := c.DatascriptQuery(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	// :find with a single pull yields rows of one element each.
+	var rows [][]struct {
+		UUID    string `json:"block/uuid"`
+		Content string `json:"block/content"`
+		Page    struct {
+			Name string `json:"block/name"`
+		} `json:"block/page"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("parse references: %w", err)
+	}
+
+	results := make([]backend.ReferenceResult, 0, len(rows))
+	for _, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+		b := row[0]
+		results = append(results, backend.ReferenceResult{
+			UUID:    b.UUID,
+			Content: b.Content,
+			Page:    b.Page.Name,
+		})
+	}
+	return results, nil
+}

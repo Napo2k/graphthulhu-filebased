@@ -24,6 +24,7 @@ func newServer(b backend.Backend, readOnly bool) *mcp.Server {
 	)
 
 	_, hasDataScript := b.(backend.HasDataScript)
+	_, hasReferences := b.(backend.ReferenceSearcher)
 
 	nav := tools.NewNavigate(b)
 	search := tools.NewSearch(b)
@@ -63,8 +64,9 @@ func newServer(b backend.Backend, readOnly bool) *mcp.Server {
 		Description: "Find paths between two pages through the link graph using BFS. Discovers how concepts are connected through intermediate pages. Returns all paths up to max_hops length.",
 	}, nav.Traverse)
 
-	// get_references requires DataScript for ancestor lookups.
-	if hasDataScript {
+	// get_references needs ((uuid)) resolution — DataScript on live Logseq, an
+	// in-memory scan on offline Logseq. Obsidian implements neither.
+	if hasReferences {
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "get_references",
 			Description: "Get all blocks that reference a specific block via ((uuid)) block references. Returns the referencing blocks with their page context.",
@@ -259,9 +261,11 @@ func newServer(b backend.Backend, readOnly bool) *mcp.Server {
 		Name:        "health",
 		Description: "Check server status: version, backend type, read-only mode, page count. Use to verify the server is alive and see its configuration.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
-		backendType := "logseq"
-		if _, ok := b.(backend.HasDataScript); !ok {
-			backendType = "obsidian"
+		backendType := "obsidian"
+		if _, ok := b.(backend.HasDataScript); ok {
+			backendType = "logseq"
+		} else if _, ok := b.(backend.ReferenceSearcher); ok {
+			backendType = "logseq-offline"
 		}
 
 		pages, _ := b.GetAllPages(ctx)

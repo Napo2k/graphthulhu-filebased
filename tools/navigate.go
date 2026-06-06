@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -206,19 +207,33 @@ func (n *Navigate) GetLinks(ctx context.Context, req *mcp.CallToolRequest, input
 	return res, nil, err
 }
 
+// uuidPattern validates a canonical UUID. get_references interpolates the UUID
+// into a DataScript query on the live Logseq backend, so rejecting anything that
+// is not a well-formed UUID closes that injection surface before it is used.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
 // GetReferences finds all blocks referencing a specific block via ((uuid)).
 func (n *Navigate) GetReferences(ctx context.Context, req *mcp.CallToolRequest, input types.GetReferencesInput) (*mcp.CallToolResult, any, error) {
-	query := fmt.Sprintf(`[:find (pull ?b [:block/uuid :block/content {:block/page [:block/name]}])
-		:where
-		[?b :block/refs ?ref]
-		[?ref :block/uuid #uuid "%s"]]`, input.UUID)
+	if !uuidPattern.MatchString(input.UUID) {
+		return errorResult(fmt.Sprintf("invalid block UUID: %q", input.UUID)), nil, nil
+	}
 
-	raw, err := n.client.DatascriptQuery(ctx, query)
+	rs, ok := n.client.(backend.ReferenceSearcher)
+	if !ok {
+		return errorResult("backend does not support block references"), nil, nil
+	}
+
+	refs, err := rs.GetBlockReferences(ctx, input.UUID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to query references: %v", err)), nil, nil
 	}
 
-	res, err := jsonRawTextResult(raw)
+	result := map[string]any{
+		"uuid":       input.UUID,
+		"references": refs,
+		"count":      len(refs),
+	}
+	res, err := jsonTextResult(result)
 	return res, nil, err
 }
 

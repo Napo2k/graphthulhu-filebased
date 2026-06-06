@@ -89,7 +89,7 @@ func runServe(args []string) {
 		}
 		vc := vault.New(vp, vault.WithDailyFolder(*dailyFolder), vault.WithIncludeHidden(*includeHidden))
 		defer vc.Close()
-		b = startVaultBackend(vc)
+		b = startVaultBackend(vc, false)
 	case "logseq-offline":
 		vp := *vaultPath
 		if vp == "" {
@@ -101,7 +101,7 @@ func runServe(args []string) {
 		}
 		vc := vault.NewLogseq(vp, vault.WithIncludeHidden(*includeHidden))
 		defer vc.Close()
-		b = startVaultBackend(vc)
+		b = startVaultBackend(vc, true)
 	case "logseq":
 		lsClient := client.New("", "")
 		checkGraphVersionControl(lsClient)
@@ -134,9 +134,21 @@ func runServe(args []string) {
 
 // startVaultBackend wraps a vault.Client in a LazyBackend and indexes it in the
 // background, so the MCP handshake completes immediately on large graphs. Shared
-// by the obsidian and logseq-offline backends. The caller owns vc.Close().
-func startVaultBackend(vc *vault.Client) backend.Backend {
-	lb := backend.NewLazyBackend(vc)
+// by the obsidian and logseq-offline backends. When logseq is true it uses
+// LazyLogseqBackend, which additionally exposes the Logseq-only capability
+// interfaces (block references, etc.) that gate offline Logseq's extra tools.
+// The caller owns vc.Close().
+func startVaultBackend(vc *vault.Client, logseq bool) backend.Backend {
+	var lb interface {
+		backend.Backend
+		MarkReady()
+		MarkFailed(error)
+	}
+	if logseq {
+		lb = backend.NewLazyLogseqBackend(vc)
+	} else {
+		lb = backend.NewLazyBackend(vc)
+	}
 	go func() {
 		if err := vc.Load(); err != nil {
 			fmt.Fprintf(os.Stderr, "graphthulhu: failed to load vault: %v\n", err)

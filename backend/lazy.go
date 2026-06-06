@@ -25,6 +25,16 @@ type IndexableBackend interface {
 	JournalSearcher
 }
 
+// LogseqIndexableBackend is an IndexableBackend that also serves the Logseq-only
+// capabilities available offline — block references now, with flashcards and
+// whiteboards added as those land. Offline Logseq (vault.Client with the Logseq
+// format) satisfies this; Obsidian (same type, Obsidian format) does not exercise
+// it because it is wrapped in a plain LazyBackend instead of LazyLogseqBackend.
+type LogseqIndexableBackend interface {
+	IndexableBackend
+	ReferenceSearcher
+}
+
 // LazyBackend wraps an IndexableBackend that needs time to initialize.
 // It responds to Ping immediately but blocks all other calls until the
 // underlying backend signals readiness.
@@ -215,4 +225,38 @@ func (lb *LazyBackend) SearchJournals(ctx context.Context, query string, from, t
 		return nil, err
 	}
 	return lb.inner.SearchJournals(ctx, query, from, to)
+}
+
+// Compile-time checks: *LazyLogseqBackend is a Backend that also exposes the
+// offline Logseq-only capabilities.
+var (
+	_ Backend          = (*LazyLogseqBackend)(nil)
+	_ ReferenceSearcher = (*LazyLogseqBackend)(nil)
+)
+
+// LazyLogseqBackend is a LazyBackend for offline Logseq. It embeds LazyBackend
+// for the shared Backend + searcher surface and additionally forwards the
+// Logseq-only capability interfaces (block references; flashcards and
+// whiteboards as they land). The plain LazyBackend used for Obsidian does not
+// implement these, so server.go's interface assertions gate the Logseq-only
+// tools to this backend without a format flag.
+type LazyLogseqBackend struct {
+	*LazyBackend
+	inner LogseqIndexableBackend
+}
+
+// NewLazyLogseqBackend wraps an offline-Logseq backend. Like NewLazyBackend it
+// answers Ping immediately and blocks other calls until MarkReady/MarkFailed.
+func NewLazyLogseqBackend(inner LogseqIndexableBackend) *LazyLogseqBackend {
+	return &LazyLogseqBackend{
+		LazyBackend: NewLazyBackend(inner),
+		inner:       inner,
+	}
+}
+
+func (lb *LazyLogseqBackend) GetBlockReferences(ctx context.Context, uuid string) ([]ReferenceResult, error) {
+	if err := lb.wait(ctx); err != nil {
+		return nil, err
+	}
+	return lb.inner.GetBlockReferences(ctx, uuid)
 }

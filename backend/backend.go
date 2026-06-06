@@ -44,6 +44,22 @@ type HasDataScript interface {
 	HasDataScript()
 }
 
+// ReferenceSearcher is implemented by backends that can resolve ((uuid)) block
+// references without DataScript. The live Logseq client answers via a DataScript
+// pull; offline Logseq scans its in-memory block index. Gating get_references on
+// this (rather than HasDataScript) lets offline Logseq serve references while
+// query_datalog stays DataScript-only. Obsidian implements neither.
+type ReferenceSearcher interface {
+	GetBlockReferences(ctx context.Context, uuid string) ([]ReferenceResult, error)
+}
+
+// ReferenceResult is a block that references another block via ((uuid)).
+type ReferenceResult struct {
+	UUID    string `json:"uuid"`
+	Content string `json:"content"`
+	Page    string `json:"page"`
+}
+
 // TagSearcher is implemented by backends that support tag search without DataScript.
 type TagSearcher interface {
 	FindBlocksByTag(ctx context.Context, tag string, includeChildren bool) ([]TagResult, error)
