@@ -2,8 +2,8 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -57,11 +57,7 @@ func (f *Flashcard) FlashcardOverview(ctx context.Context, req *mcp.CallToolRequ
 		}
 
 		reviewedCount++
-		if repeats, ok := props["card-repeats"]; ok {
-			if r, ok := repeats.(float64); ok {
-				totalRepeats += r
-			}
-		}
+		totalRepeats += toFloat(props["card-repeats"])
 
 		if f.isCardDue(props, now) {
 			dueCount++
@@ -158,55 +154,42 @@ func (f *Flashcard) FlashcardCreate(ctx context.Context, req *mcp.CallToolReques
 // --- Internal helpers ---
 
 func (f *Flashcard) getAllCards(ctx context.Context) ([]cardData, error) {
-	query := `[:find (pull ?b [:block/uuid :block/content :block/properties
-	                           {:block/page [:block/name :block/original-name]}])
-		:where
-		[?b :block/refs ?ref]
-		[?ref :block/name "card"]]`
+	fp, ok := f.client.(backend.FlashcardProvider)
+	if !ok {
+		return nil, fmt.Errorf("backend does not support flashcards")
+	}
 
-	raw, err := f.client.DatascriptQuery(ctx, query)
+	entries, err := fp.GetFlashcards(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var results [][]json.RawMessage
-	if err := json.Unmarshal(raw, &results); err != nil {
-		return nil, err
+	cards := make([]cardData, 0, len(entries))
+	for _, e := range entries {
+		cards = append(cards, cardData{
+			UUID:       e.UUID,
+			Content:    e.Content,
+			Page:       e.Page,
+			Properties: e.Properties,
+		})
 	}
-
-	var cards []cardData
-	for _, r := range results {
-		if len(r) == 0 {
-			continue
-		}
-		var block struct {
-			UUID       string         `json:"uuid"`
-			Content    string         `json:"content"`
-			Properties map[string]any `json:"properties"`
-			Page       *struct {
-				Name         string `json:"name"`
-				OriginalName string `json:"original-name"`
-			} `json:"page"`
-		}
-		if err := json.Unmarshal(r[0], &block); err != nil {
-			continue
-		}
-
-		cd := cardData{
-			UUID:       block.UUID,
-			Content:    block.Content,
-			Properties: block.Properties,
-		}
-		if block.Page != nil {
-			cd.Page = block.Page.OriginalName
-			if cd.Page == "" {
-				cd.Page = block.Page.Name
-			}
-		}
-		cards = append(cards, cd)
-	}
-
 	return cards, nil
+}
+
+// toFloat coerces a property value to a float. The live Logseq backend yields
+// JSON numbers (float64); the offline backend yields parsed string values.
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case string:
+		if f, err := strconv.ParseFloat(n, 64); err == nil {
+			return f
+		}
+	}
+	return 0
 }
 
 func (f *Flashcard) isCardDue(props map[string]any, now time.Time) bool {

@@ -60,6 +60,24 @@ type ReferenceResult struct {
 	Page    string `json:"page"`
 }
 
+// FlashcardProvider is implemented by backends that can enumerate #card blocks
+// without DataScript. The live Logseq client answers via a DataScript pull;
+// offline Logseq scans its block index for blocks tagged #card. The SRS
+// scheduling logic lives in the tool layer; this only surfaces the raw cards.
+type FlashcardProvider interface {
+	GetFlashcards(ctx context.Context) ([]FlashcardEntry, error)
+}
+
+// FlashcardEntry is a #card block with its SRS properties (card-next-schedule,
+// card-repeats, …). Properties are untyped because the live backend yields JSON
+// numbers while the offline backend yields parsed string values.
+type FlashcardEntry struct {
+	UUID       string         `json:"uuid"`
+	Content    string         `json:"content"`
+	Page       string         `json:"page,omitempty"`
+	Properties map[string]any `json:"properties,omitempty"`
+}
+
 // TagSearcher is implemented by backends that support tag search without DataScript.
 type TagSearcher interface {
 	FindBlocksByTag(ctx context.Context, tag string, includeChildren bool) ([]TagResult, error)

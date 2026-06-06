@@ -33,6 +33,7 @@ type IndexableBackend interface {
 type LogseqIndexableBackend interface {
 	IndexableBackend
 	ReferenceSearcher
+	FlashcardProvider
 }
 
 // LazyBackend wraps an IndexableBackend that needs time to initialize.
@@ -230,8 +231,9 @@ func (lb *LazyBackend) SearchJournals(ctx context.Context, query string, from, t
 // Compile-time checks: *LazyLogseqBackend is a Backend that also exposes the
 // offline Logseq-only capabilities.
 var (
-	_ Backend          = (*LazyLogseqBackend)(nil)
+	_ Backend           = (*LazyLogseqBackend)(nil)
 	_ ReferenceSearcher = (*LazyLogseqBackend)(nil)
+	_ FlashcardProvider = (*LazyLogseqBackend)(nil)
 )
 
 // LazyLogseqBackend is a LazyBackend for offline Logseq. It embeds LazyBackend
@@ -259,4 +261,11 @@ func (lb *LazyLogseqBackend) GetBlockReferences(ctx context.Context, uuid string
 		return nil, err
 	}
 	return lb.inner.GetBlockReferences(ctx, uuid)
+}
+
+func (lb *LazyLogseqBackend) GetFlashcards(ctx context.Context) ([]FlashcardEntry, error) {
+	if err := lb.wait(ctx); err != nil {
+		return nil, err
+	}
+	return lb.inner.GetFlashcards(ctx)
 }

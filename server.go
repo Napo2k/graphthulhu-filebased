@@ -25,6 +25,7 @@ func newServer(b backend.Backend, readOnly bool) *mcp.Server {
 
 	_, hasDataScript := b.(backend.HasDataScript)
 	_, hasReferences := b.(backend.ReferenceSearcher)
+	_, hasFlashcards := b.(backend.FlashcardProvider)
 
 	nav := tools.NewNavigate(b)
 	search := tools.NewSearch(b)
@@ -219,8 +220,8 @@ func newServer(b backend.Backend, readOnly bool) *mcp.Server {
 		Description: "Search within journal entries specifically. Optionally filter by date range. Returns matching blocks with their journal date context.",
 	}, journal.JournalSearch)
 
-	// --- Flashcard tools (DataScript-only for overview/due) ---
-	if hasDataScript {
+	// --- Flashcard tools (live Logseq via DataScript; offline Logseq via #card scan) ---
+	if hasFlashcards {
 		flashcard := tools.NewFlashcard(b)
 
 		mcp.AddTool(srv, &mcp.Tool{

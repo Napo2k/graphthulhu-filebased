@@ -484,6 +484,50 @@ func (c *Client) GetBlockReferences(_ context.Context, uuid string) ([]backend.R
 	return results, nil
 }
 
+// Compile-time check: *Client enumerates flashcards for offline Logseq.
+var _ backend.FlashcardProvider = (*Client)(nil)
+
+// GetFlashcards returns every block tagged #card (or [[card]]) with its parsed
+// block properties, scanning the in-memory block index. Implements
+// backend.FlashcardProvider. SRS scheduling is left to the tool layer. Results
+// are sorted by page then content for stable output.
+func (c *Client) GetFlashcards(_ context.Context) ([]backend.FlashcardEntry, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var cards []backend.FlashcardEntry
+	for _, lookup := range c.blockIndex {
+		parsed := parser.Parse(lookup.block.Content)
+		if !containsFold(parsed.Tags, "card") && !containsFold(parsed.Links, "card") {
+			continue
+		}
+		cards = append(cards, backend.FlashcardEntry{
+			UUID:       lookup.block.UUID,
+			Content:    lookup.block.Content,
+			Page:       lookup.page,
+			Properties: lookup.block.Properties,
+		})
+	}
+
+	sort.Slice(cards, func(i, j int) bool {
+		if cards[i].Page != cards[j].Page {
+			return cards[i].Page < cards[j].Page
+		}
+		return cards[i].Content < cards[j].Content
+	})
+	return cards, nil
+}
+
+// containsFold reports whether vals contains target, case-insensitively.
+func containsFold(vals []string, target string) bool {
+	for _, v := range vals {
+		if strings.EqualFold(v, target) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) GetPageLinkedReferences(_ context.Context, nameOrID any) (json.RawMessage, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

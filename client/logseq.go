@@ -319,13 +319,14 @@ func (c *Client) GetBlockReferences(ctx context.Context, uuid string) ([]backend
 		return nil, err
 	}
 
-	// :find with a single pull yields rows of one element each.
+	// :find with a single pull yields rows of one element each. Logseq's API
+	// returns pull results with the :block/ namespace stripped from keys.
 	var rows [][]struct {
-		UUID    string `json:"block/uuid"`
-		Content string `json:"block/content"`
+		UUID    string `json:"uuid"`
+		Content string `json:"content"`
 		Page    struct {
-			Name string `json:"block/name"`
-		} `json:"block/page"`
+			Name string `json:"name"`
+		} `json:"page"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, fmt.Errorf("parse references: %w", err)
@@ -344,4 +345,56 @@ func (c *Client) GetBlockReferences(ctx context.Context, uuid string) ([]backend
 		})
 	}
 	return results, nil
+}
+
+// Compile-time check: *Client enumerates flashcards.
+var _ backend.FlashcardProvider = (*Client)(nil)
+
+// GetFlashcards returns every #card block with its SRS properties, via a
+// constant DataScript pull over blocks referencing the "card" page. Implements
+// backend.FlashcardProvider.
+func (c *Client) GetFlashcards(ctx context.Context) ([]backend.FlashcardEntry, error) {
+	query := `[:find (pull ?b [:block/uuid :block/content :block/properties
+	                           {:block/page [:block/name :block/original-name]}])
+		:where
+		[?b :block/refs ?ref]
+		[?ref :block/name "card"]]`
+
+	raw, err := c.DatascriptQuery(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	// Logseq's API returns pull results with the :block/ namespace stripped.
+	var rows [][]struct {
+		UUID       string         `json:"uuid"`
+		Content    string         `json:"content"`
+		Properties map[string]any `json:"properties"`
+		Page       struct {
+			Name         string `json:"name"`
+			OriginalName string `json:"original-name"`
+		} `json:"page"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("parse flashcards: %w", err)
+	}
+
+	cards := make([]backend.FlashcardEntry, 0, len(rows))
+	for _, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+		b := row[0]
+		page := b.Page.OriginalName
+		if page == "" {
+			page = b.Page.Name
+		}
+		cards = append(cards, backend.FlashcardEntry{
+			UUID:       b.UUID,
+			Content:    b.Content,
+			Page:       page,
+			Properties: b.Properties,
+		})
+	}
+	return cards, nil
 }

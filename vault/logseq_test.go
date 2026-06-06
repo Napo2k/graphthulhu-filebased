@@ -366,6 +366,48 @@ func TestLogseqGetBlockReferences(t *testing.T) {
 	}
 }
 
+func TestLogseqGetFlashcards(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// One reviewed card (#card + SRS props), one new card ([[card]] ref, no
+	// props), and a non-card block that must be excluded.
+	notes := "- What is a monad? #card\n  card-repeats:: 3\n  card-next-schedule:: 2030-01-01\n" +
+		"- Define functor [[card]]\n" +
+		"- Just a regular block\n"
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Notes.md"), []byte(notes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cards, err := c.GetFlashcards(context.Background())
+	if err != nil {
+		t.Fatalf("GetFlashcards: %v", err)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("expected 2 cards, got %d: %+v", len(cards), cards)
+	}
+	// Sorted by content: "Define functor..." before "What is a monad?...".
+	if !strings.Contains(cards[0].Content, "Define functor") {
+		t.Errorf("card[0] = %q", cards[0].Content)
+	}
+	monad := cards[1]
+	if !strings.Contains(monad.Content, "What is a monad?") {
+		t.Errorf("card[1] = %q", monad.Content)
+	}
+	if monad.Properties["card-repeats"] != "3" {
+		t.Errorf("card-repeats = %v, want \"3\"", monad.Properties["card-repeats"])
+	}
+	if monad.Properties["card-next-schedule"] != "2030-01-01" {
+		t.Errorf("card-next-schedule = %v", monad.Properties["card-next-schedule"])
+	}
+}
+
 func TestReadJournalLayout(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "logseq"), 0o755); err != nil {
