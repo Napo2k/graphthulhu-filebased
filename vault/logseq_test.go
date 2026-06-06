@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/skridlevsky/graphthulhu/types"
 )
 
 // fakeFileInfo is a minimal os.FileInfo for exercising Parse without disk I/O.
@@ -405,6 +407,67 @@ func TestLogseqGetFlashcards(t *testing.T) {
 	}
 	if monad.Properties["card-next-schedule"] != "2030-01-01" {
 		t.Errorf("card-next-schedule = %v", monad.Properties["card-next-schedule"])
+	}
+}
+
+func TestLogseqInsertChildAfterParentProps(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Deck.md"), []byte("- existing block\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ctx := context.Background()
+
+	// Append a parent block (writes `- front` + an indented `id::` line), then
+	// insert a child under it. The child must land after the parent's id:: line.
+	parent, err := c.AppendBlockInPage(ctx, "Deck", "What is 2+2? #card")
+	if err != nil {
+		t.Fatalf("AppendBlockInPage: %v", err)
+	}
+	if _, err := c.InsertBlock(ctx, parent.UUID, "4", map[string]any{"isPageBlock": false}); err != nil {
+		t.Fatalf("InsertBlock: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "pages", "Deck.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	parentIDLine := strings.Index(got, "\n  id:: "+parent.UUID)
+	childBullet := strings.Index(got, "\n\t- 4")
+	if parentIDLine < 0 {
+		t.Fatalf("parent id:: line missing on disk:\n%s", got)
+	}
+	if childBullet < 0 {
+		t.Fatalf("child bullet missing on disk:\n%s", got)
+	}
+	if parentIDLine > childBullet {
+		t.Errorf("parent id:: must precede child bullet, got:\n%s", got)
+	}
+
+	// And it must re-parse with the child nested under the parent.
+	blocks, err := c.GetPageBlocksTree(ctx, "Deck")
+	if err != nil {
+		t.Fatalf("GetPageBlocksTree: %v", err)
+	}
+	var card *types.BlockEntity
+	for i := range blocks {
+		if strings.Contains(blocks[i].Content, "What is 2+2?") {
+			card = &blocks[i]
+		}
+	}
+	if card == nil {
+		t.Fatalf("card block not found after re-parse: %+v", blocks)
+	}
+	if len(card.Children) != 1 || card.Children[0].Content != "4" {
+		t.Errorf("expected one child \"4\", got %+v", card.Children)
 	}
 }
 

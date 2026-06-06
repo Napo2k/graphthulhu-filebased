@@ -798,6 +798,10 @@ func (c *Client) InsertBlock(_ context.Context, srcBlock any, content string, op
 		parentLine = parentLine[:nl]
 	}
 
+	// Advance past the parent's own trailing continuation lines (Logseq id::/
+	// property lines) so the child lands after them, not inside the parent.
+	insertPos = c.format.ChildInsertOffset(fileStr, insertPos, parentLine)
+
 	blockUUID, cleanContent := c.format.ExtractID(content)
 	if blockUUID == "" {
 		blockUUID = generateRandomUUID()

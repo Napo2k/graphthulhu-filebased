@@ -52,6 +52,16 @@ type format interface {
 	// (Obsidian YAML frontmatter; Logseq leading `key:: value` lines) from the
 	// rest of the body, so a prepended block lands after the page properties.
 	SplitLeadingProperties(content string) (head, body string)
+
+	// ChildInsertOffset returns the byte offset in fileStr at which a new child
+	// of the parent block should be spliced. contentEnd is the offset just past
+	// the parent's matched block.Content; parentLine is the parent's first
+	// on-disk line (for indentation context). Obsidian inserts at contentEnd —
+	// its block content spans the whole heading section, id comment included.
+	// Logseq advances past the parent's trailing continuation lines (the
+	// de-indented `id::`/property lines that are not part of block.Content) so
+	// the child lands after them but before any existing children.
+	ChildInsertOffset(fileStr string, contentEnd int, parentLine string) int
 }
 
 // obsidianFormat implements format for an Obsidian vault: heading-sectioned
@@ -128,4 +138,11 @@ func (f *obsidianFormat) SplitLeadingProperties(content string) (head, body stri
 		return renderFrontmatter(props), body
 	}
 	return "", content
+}
+
+// ChildInsertOffset for Obsidian is contentEnd unchanged: a block's content
+// spans the whole heading section (with its embedded id comment), so the child
+// heading is spliced right after it.
+func (f *obsidianFormat) ChildInsertOffset(_ string, contentEnd int, _ string) int {
+	return contentEnd
 }

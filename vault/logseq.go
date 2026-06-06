@@ -343,6 +343,53 @@ func deindentContinuation(line string, depth int) string {
 	return rest
 }
 
+// ChildInsertOffset advances past the parent's trailing continuation lines —
+// the de-indented `id::`/property/wrapped lines that the parser strips out of
+// block.Content but that live on disk between the bullet and its children — so a
+// newly inserted child lands after them rather than splitting the parent block.
+// It stops at the first bullet (a child or sibling), a blank line, or a line
+// dedented below the parent.
+func (f *logseqFormat) ChildInsertOffset(fileStr string, contentEnd int, parentLine string) int {
+	parentDepth := 0
+	for parentDepth < len(parentLine) && parentLine[parentDepth] == '\t' {
+		parentDepth++
+	}
+
+	pos := contentEnd
+	for pos < len(fileStr) && fileStr[pos] == '\n' {
+		lineStart := pos + 1
+		if lineStart > len(fileStr) {
+			break
+		}
+		line := fileStr[lineStart:]
+		if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+			line = line[:nl]
+		}
+		trimmedLine := strings.TrimRight(line, "\r")
+
+		if strings.TrimSpace(trimmedLine) == "" {
+			break // blank line ends the block region
+		}
+		if _, isBullet, _ := bulletInfo(trimmedLine); isBullet {
+			break // a child or sibling bullet
+		}
+		// Aligned continuation: after the parent's leading tabs the line begins
+		// with a space (Logseq aligns id::/property/wrapped lines under the
+		// bullet text). This deliberately does not match Obsidian headings.
+		rest := trimmedLine
+		k := 0
+		for k < len(rest) && k < parentDepth && rest[k] == '\t' {
+			k++
+		}
+		rest = rest[k:]
+		if !strings.HasPrefix(rest, " ") {
+			break
+		}
+		pos = lineStart + len(line)
+	}
+	return pos
+}
+
 // finalizeNode converts a parse node into a BlockEntity, splitting out the
 // id:: UUID and other block properties.
 func finalizeNode(relPath string, n *lsNode) types.BlockEntity {
