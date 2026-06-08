@@ -78,6 +78,23 @@ type FlashcardEntry struct {
 	Properties map[string]any `json:"properties,omitempty"`
 }
 
+// WhiteboardProvider is implemented by backends that can enumerate whiteboard
+// pages without DataScript. The live Logseq client answers via a DataScript pull
+// for pages typed "whiteboard"; offline Logseq scans its page index for pages
+// stored under the whiteboards/ directory. Reading a single whiteboard's content
+// stays backend-agnostic (it goes through GetPageBlocksTree), so only the listing
+// needs this capability.
+type WhiteboardProvider interface {
+	GetWhiteboards(ctx context.Context) ([]WhiteboardEntry, error)
+}
+
+// WhiteboardEntry is a whiteboard page's identity and last-modified time.
+type WhiteboardEntry struct {
+	UUID      string `json:"uuid"`
+	Name      string `json:"name"`
+	UpdatedAt int64  `json:"updatedAt,omitempty"`
+}
+
 // TagSearcher is implemented by backends that support tag search without DataScript.
 type TagSearcher interface {
 	FindBlocksByTag(ctx context.Context, tag string, includeChildren bool) ([]TagResult, error)

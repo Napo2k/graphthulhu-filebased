@@ -398,3 +398,49 @@ func (c *Client) GetFlashcards(ctx context.Context) ([]backend.FlashcardEntry, e
 	}
 	return cards, nil
 }
+
+// Compile-time check: live Logseq enumerates whiteboards via DataScript.
+var _ backend.WhiteboardProvider = (*Client)(nil)
+
+// GetWhiteboards returns every whiteboard page, via a constant DataScript pull
+// over pages typed "whiteboard". Implements backend.WhiteboardProvider.
+func (c *Client) GetWhiteboards(ctx context.Context) ([]backend.WhiteboardEntry, error) {
+	query := `[:find (pull ?p [:block/uuid :block/name :block/original-name :block/updated-at])
+		:where
+		[?p :block/name]
+		[?p :block/type "whiteboard"]]`
+
+	raw, err := c.DatascriptQuery(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	// Logseq's API returns pull results with the :block/ namespace stripped.
+	var rows [][]struct {
+		UUID         string `json:"uuid"`
+		Name         string `json:"name"`
+		OriginalName string `json:"original-name"`
+		UpdatedAt    int64  `json:"updated-at"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("parse whiteboards: %w", err)
+	}
+
+	boards := make([]backend.WhiteboardEntry, 0, len(rows))
+	for _, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+		p := row[0]
+		name := p.OriginalName
+		if name == "" {
+			name = p.Name
+		}
+		boards = append(boards, backend.WhiteboardEntry{
+			UUID:      p.UUID,
+			Name:      name,
+			UpdatedAt: p.UpdatedAt,
+		})
+	}
+	return boards, nil
+}

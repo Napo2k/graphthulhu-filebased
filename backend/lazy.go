@@ -26,14 +26,15 @@ type IndexableBackend interface {
 }
 
 // LogseqIndexableBackend is an IndexableBackend that also serves the Logseq-only
-// capabilities available offline — block references now, with flashcards and
-// whiteboards added as those land. Offline Logseq (vault.Client with the Logseq
+// capabilities available offline — block references, flashcards, and whiteboards.
+// Offline Logseq (vault.Client with the Logseq
 // format) satisfies this; Obsidian (same type, Obsidian format) does not exercise
 // it because it is wrapped in a plain LazyBackend instead of LazyLogseqBackend.
 type LogseqIndexableBackend interface {
 	IndexableBackend
 	ReferenceSearcher
 	FlashcardProvider
+	WhiteboardProvider
 }
 
 // LazyBackend wraps an IndexableBackend that needs time to initialize.
@@ -231,9 +232,10 @@ func (lb *LazyBackend) SearchJournals(ctx context.Context, query string, from, t
 // Compile-time checks: *LazyLogseqBackend is a Backend that also exposes the
 // offline Logseq-only capabilities.
 var (
-	_ Backend           = (*LazyLogseqBackend)(nil)
-	_ ReferenceSearcher = (*LazyLogseqBackend)(nil)
-	_ FlashcardProvider = (*LazyLogseqBackend)(nil)
+	_ Backend            = (*LazyLogseqBackend)(nil)
+	_ ReferenceSearcher  = (*LazyLogseqBackend)(nil)
+	_ FlashcardProvider  = (*LazyLogseqBackend)(nil)
+	_ WhiteboardProvider = (*LazyLogseqBackend)(nil)
 )
 
 // LazyLogseqBackend is a LazyBackend for offline Logseq. It embeds LazyBackend
@@ -268,4 +270,11 @@ func (lb *LazyLogseqBackend) GetFlashcards(ctx context.Context) ([]FlashcardEntr
 		return nil, err
 	}
 	return lb.inner.GetFlashcards(ctx)
+}
+
+func (lb *LazyLogseqBackend) GetWhiteboards(ctx context.Context) ([]WhiteboardEntry, error) {
+	if err := lb.wait(ctx); err != nil {
+		return nil, err
+	}
+	return lb.inner.GetWhiteboards(ctx)
 }

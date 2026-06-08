@@ -2,9 +2,7 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/skridlevsky/graphthulhu/backend"
@@ -24,59 +22,27 @@ func NewWhiteboard(c backend.Backend) *Whiteboard {
 
 // ListWhiteboards returns all whiteboards in the graph.
 func (w *Whiteboard) ListWhiteboards(ctx context.Context, req *mcp.CallToolRequest, input types.ListWhiteboardsInput) (*mcp.CallToolResult, any, error) {
-	// Whiteboards in Logseq are pages stored in the whiteboards/ directory.
-	// Try DataScript query first for whiteboard-type pages.
-	query := `[:find (pull ?p [:block/uuid :block/name :block/original-name
-	                           :block/created-at :block/updated-at])
-		:where
-		[?p :block/name]
-		[?p :block/type "whiteboard"]]`
+	provider, ok := w.client.(backend.WhiteboardProvider)
+	if !ok {
+		return errorResult("backend does not support whiteboards"), nil, nil
+	}
 
-	raw, err := w.client.DatascriptQuery(ctx, query)
+	entries, err := provider.GetWhiteboards(ctx)
 	if err != nil {
-		// Fallback: try to find whiteboards by file path pattern
-		return w.listWhiteboardsFallback(ctx)
+		return errorResult(fmt.Sprintf("failed to list whiteboards: %v", err)), nil, nil
 	}
 
-	var results [][]json.RawMessage
-	if err := json.Unmarshal(raw, &results); err != nil {
-		return w.listWhiteboardsFallback(ctx)
-	}
-
-	if len(results) == 0 {
-		// Try fallback before giving up
-		return w.listWhiteboardsFallback(ctx)
-	}
-
-	var boards []map[string]any
-	for _, r := range results {
-		if len(r) == 0 {
-			continue
-		}
-		var page struct {
-			UUID         string `json:"uuid"`
-			Name         string `json:"name"`
-			OriginalName string `json:"original-name"`
-			CreatedAt    int64  `json:"created-at"`
-			UpdatedAt    int64  `json:"updated-at"`
-		}
-		if err := json.Unmarshal(r[0], &page); err != nil {
-			continue
-		}
-		name := page.OriginalName
-		if name == "" {
-			name = page.Name
-		}
-		boards = append(boards, map[string]any{
-			"uuid":      page.UUID,
-			"name":      name,
-			"createdAt": page.CreatedAt,
-			"updatedAt": page.UpdatedAt,
-		})
-	}
-
-	if len(boards) == 0 {
+	if len(entries) == 0 {
 		return textResult("No whiteboards found in the graph."), nil, nil
+	}
+
+	boards := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		boards = append(boards, map[string]any{
+			"uuid":      e.UUID,
+			"name":      e.Name,
+			"updatedAt": e.UpdatedAt,
+		})
 	}
 
 	res, err := jsonTextResult(map[string]any{
@@ -158,44 +124,3 @@ func (w *Whiteboard) GetWhiteboard(ctx context.Context, req *mcp.CallToolRequest
 	return res, nil, err
 }
 
-// --- Fallback ---
-
-func (w *Whiteboard) listWhiteboardsFallback(ctx context.Context) (*mcp.CallToolResult, any, error) {
-	// Fallback: scan all pages and look for whiteboard indicators
-	pages, err := w.client.GetAllPages(ctx)
-	if err != nil {
-		return errorResult(fmt.Sprintf("failed to list pages: %v", err)), nil, nil
-	}
-
-	var boards []map[string]any
-	for _, p := range pages {
-		if p.Name == "" {
-			continue
-		}
-		// Check if file path indicates whiteboard
-		if p.File != nil && strings.Contains(p.File.Path, "whiteboards/") {
-			name := p.OriginalName
-			if name == "" {
-				name = p.Name
-			}
-			boards = append(boards, map[string]any{
-				"uuid":      p.UUID,
-				"name":      name,
-				"updatedAt": p.UpdatedAt,
-			})
-		}
-	}
-
-	if len(boards) == 0 {
-		return textResult("No whiteboards found in the graph."), nil, nil
-	}
-
-	res, err := jsonTextResult(map[string]any{
-		"count":       len(boards),
-		"whiteboards": boards,
-	})
-	return res, nil, err
-}
-
-// Ensure types.BlockEntity fields are accessible (uses existing Content, UUID, Properties, Children)
-var _ = types.BlockEntity{}

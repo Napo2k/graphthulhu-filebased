@@ -471,6 +471,43 @@ func TestLogseqInsertChildAfterParentProps(t *testing.T) {
 	}
 }
 
+func TestLogseqGetWhiteboards(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "whiteboards"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Two whiteboards plus a regular page that must be excluded.
+	if err := os.WriteFile(filepath.Join(dir, "whiteboards", "Roadmap.md"), []byte("- canvas\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "whiteboards", "Ideas.md"), []byte("- canvas\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Notes.md"), []byte("- not a board\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	boards, err := c.GetWhiteboards(context.Background())
+	if err != nil {
+		t.Fatalf("GetWhiteboards: %v", err)
+	}
+	if len(boards) != 2 {
+		t.Fatalf("expected 2 whiteboards, got %d: %+v", len(boards), boards)
+	}
+	// Sorted by name: "Ideas" before "Roadmap".
+	if boards[0].Name != "whiteboards/Ideas" || boards[1].Name != "whiteboards/Roadmap" {
+		t.Errorf("unexpected whiteboard names: %+v", boards)
+	}
+}
+
 func TestReadJournalLayout(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "logseq"), 0o755); err != nil {

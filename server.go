@@ -26,6 +26,7 @@ func newServer(b backend.Backend, readOnly bool) *mcp.Server {
 	_, hasDataScript := b.(backend.HasDataScript)
 	_, hasReferences := b.(backend.ReferenceSearcher)
 	_, hasFlashcards := b.(backend.FlashcardProvider)
+	_, hasWhiteboards := b.(backend.WhiteboardProvider)
 
 	nav := tools.NewNavigate(b)
 	search := tools.NewSearch(b)
@@ -243,7 +244,7 @@ func newServer(b backend.Backend, readOnly bool) *mcp.Server {
 	}
 
 	// --- Whiteboard tools (Logseq-specific) ---
-	if hasDataScript {
+	if hasWhiteboards {
 		whiteboard := tools.NewWhiteboard(b)
 
 		mcp.AddTool(srv, &mcp.Tool{

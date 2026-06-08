@@ -518,6 +518,45 @@ func (c *Client) GetFlashcards(_ context.Context) ([]backend.FlashcardEntry, err
 	return cards, nil
 }
 
+// Compile-time check: offline Logseq enumerates whiteboards by scanning the
+// in-memory page index.
+var _ backend.WhiteboardProvider = (*Client)(nil)
+
+// GetWhiteboards returns every whiteboard page — those stored under the
+// whiteboards/ directory — scanning the in-memory page index. Implements
+// backend.WhiteboardProvider. Reading a board's content stays backend-agnostic
+// (GetPageBlocksTree). Results are sorted by name for stable output.
+func (c *Client) GetWhiteboards(_ context.Context) ([]backend.WhiteboardEntry, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	var boards []backend.WhiteboardEntry
+	for _, page := range c.pages {
+		if seen[page.lowerName] {
+			continue // skip alias duplicates
+		}
+		if !strings.Contains(filepath.ToSlash(page.filePath), "whiteboards/") {
+			continue
+		}
+		seen[page.lowerName] = true
+		name := page.entity.OriginalName
+		if name == "" {
+			name = page.entity.Name
+		}
+		boards = append(boards, backend.WhiteboardEntry{
+			UUID:      page.entity.UUID,
+			Name:      name,
+			UpdatedAt: page.entity.UpdatedAt,
+		})
+	}
+
+	sort.Slice(boards, func(i, j int) bool {
+		return boards[i].Name < boards[j].Name
+	})
+	return boards, nil
+}
+
 // containsFold reports whether vals contains target, case-insensitively.
 func containsFold(vals []string, target string) bool {
 	for _, v := range vals {
