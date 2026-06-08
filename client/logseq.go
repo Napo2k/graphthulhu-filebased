@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/skridlevsky/graphthulhu/backend"
@@ -432,6 +433,38 @@ func (c *Client) GetWhiteboards(ctx context.Context) ([]backend.WhiteboardEntry,
 			continue
 		}
 		p := row[0]
+		name := p.OriginalName
+		if name == "" {
+			name = p.Name
+		}
+		boards = append(boards, backend.WhiteboardEntry{
+			UUID:      p.UUID,
+			Name:      name,
+			UpdatedAt: p.UpdatedAt,
+		})
+	}
+
+	// Some graphs/versions don't populate :block/type "whiteboard". Fall back to
+	// the file-path convention (whiteboards/ directory) when the typed query
+	// finds nothing, matching how the offline backend detects boards.
+	if len(boards) == 0 {
+		return c.whiteboardsByPath(ctx)
+	}
+	return boards, nil
+}
+
+// whiteboardsByPath enumerates whiteboards by the whiteboards/ file-path
+// convention, for graphs where :block/type "whiteboard" is unset.
+func (c *Client) whiteboardsByPath(ctx context.Context) ([]backend.WhiteboardEntry, error) {
+	pages, err := c.GetAllPages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	boards := make([]backend.WhiteboardEntry, 0)
+	for _, p := range pages {
+		if p.Name == "" || p.File == nil || !strings.Contains(p.File.Path, "whiteboards/") {
+			continue
+		}
 		name := p.OriginalName
 		if name == "" {
 			name = p.Name
