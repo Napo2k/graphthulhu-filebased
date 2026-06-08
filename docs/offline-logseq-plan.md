@@ -1,6 +1,6 @@
 # Offline Logseq Mode — Implementation Plan
 
-Status: **in progress** — build-order steps 1–5 done; 6 (flashcards), 7 (whiteboards), 8 (testdata + docs) remain.
+Status: **done** — all build-order steps (1–8) implemented, tested, and documented.
 
 A third backend, selectable via `--backend logseq-offline` (or
 `GRAPHTHULHU_BACKEND=logseq-offline`), that reads/writes a Logseq graph directly
@@ -127,10 +127,15 @@ surface Logseq-only tools without faking Datalog.
    existing DataScript pull; offline scans the block index. `get_references` now
    gates on `ReferenceSearcher`, `query_datalog` stays on `HasDataScript`. UUID
    input validated before query interpolation.
-6. Flashcards (`FlashcardProvider`).
-7. Whiteboards (`WhiteboardProvider`) — sequenced last so a regression here can't
-   block the rest.
-8. Logseq `testdata` fixtures + round-trip / UUID-stability tests; update
+6. ✅ Flashcards (`FlashcardProvider`). Live Logseq pulls `#card` blocks via
+   DataScript; offline scans the block index for `#card`/`[[card]]`. Flashcard
+   tools gate on `FlashcardProvider`.
+7. ✅ Whiteboards (`WhiteboardProvider`) — sequenced last so a regression here
+   can't block the rest. Live Logseq pulls `:block/type "whiteboard"` pages (with
+   a `whiteboards/` path-scan fallback); offline scans the page index for
+   `whiteboards/` pages. Whiteboard tools gate on `WhiteboardProvider`;
+   `get_whiteboard` stays backend-agnostic via `GetPageBlocksTree`.
+8. ✅ Logseq `testdata` fixtures + graph-load / UUID-stability tests; updated
    `README.md` (backend table, setup) and `CLAUDE.md` (backend list, new gating).
 
 ## Testing
