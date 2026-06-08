@@ -216,6 +216,36 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
+### Logseq (offline) — Claude Code
+
+No running Logseq, HTTP server, or token — point it at the graph directory on disk:
+
+```json
+{
+  "mcpServers": {
+    "graphthulhu": {
+      "command": "graphthulhu",
+      "args": ["--backend", "logseq-offline", "--vault", "/path/to/your/graph"],
+      "env": {}
+    }
+  }
+}
+```
+
+### Logseq (offline) — Claude Desktop
+
+```json
+{
+  "mcpServers": {
+    "graphthulhu": {
+      "command": "graphthulhu",
+      "args": ["--backend", "logseq-offline", "--vault", "/path/to/your/graph"],
+      "env": {}
+    }
+  }
+}
+```
+
 ### Obsidian — Claude Code
 
 ```json
@@ -246,7 +276,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 
 ### Read-only mode
 
-To disable all write operations (Logseq — Obsidian is always read-only):
+All three backends are read-write by default. Pass `--read-only` to disable every write (and decision) tool on any of them — for example with live Logseq:
 
 ```json
 {
@@ -265,7 +295,7 @@ To disable all write operations (Logseq — Obsidian is always read-only):
 
 ### Version control warning
 
-On startup with the Logseq backend, graphthulhu checks if your graph directory is git-controlled. If not, it prints a warning to stderr suggesting you initialize version control. Write operations cannot be undone without it.
+On startup with the live Logseq backend, graphthulhu checks if your graph directory is git-controlled. If not, it prints a warning to stderr suggesting you initialize version control. Write operations cannot be undone without it. (The offline Logseq and Obsidian backends write to disk too — keeping the vault under version control is recommended there as well.)
 
 ### Environment variables
 
