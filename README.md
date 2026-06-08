@@ -1,6 +1,6 @@
 # graphthulhu
 
-MCP server that gives AI full access to your knowledge graph. Supports **Logseq** and **Obsidian** — both with full read-write support. Navigate pages, search blocks, analyze link structure, track decisions, manage flashcards, and write content — all through the [Model Context Protocol](https://modelcontextprotocol.io).
+MCP server that gives AI full access to your knowledge graph. Supports **Logseq** (live via its HTTP API, or **offline** straight from the graph's `.md` files) and **Obsidian** — all with full read-write support. Navigate pages, search blocks, analyze link structure, track decisions, manage flashcards, and write content — all through the [Model Context Protocol](https://modelcontextprotocol.io).
 
 Built in Go with the [official MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).
 
@@ -24,7 +24,7 @@ It turns "tell me about X" into an AI that actually understands your knowledge g
 
 ## Tools
 
-37 tools across 9 categories. Most work with both backends; some are Logseq-only (DataScript queries, flashcards, whiteboards).
+37 tools across 9 categories. Most work with every backend. A few are Logseq-only: `get_references`, flashcards, and whiteboards work on both the live Logseq backend and the offline (`logseq-offline`) backend, while `query_datalog` requires a live Logseq DataScript engine.
 
 ### Navigate
 
@@ -137,6 +137,26 @@ go build -o graphthulhu .
 4. Click **Create Token** and copy the generated token — you'll need it for configuration
 
 The API runs on `http://127.0.0.1:12315` by default.
+
+### Setup: Logseq (offline)
+
+Don't want to keep Logseq running, or want read access to a graph on disk without the HTTP API? The `logseq-offline` backend reads and writes your Logseq graph's `.md` files directly — no Logseq app, HTTP server, or token required. It speaks Logseq's outliner syntax (`- ` bullets, tab nesting, `id::` block properties, `key:: value` page properties) rather than Obsidian's heading sections.
+
+```bash
+graphthulhu serve --backend logseq-offline --vault /path/to/your/graph
+```
+
+Or via environment variables:
+
+```bash
+export GRAPHTHULHU_BACKEND=logseq-offline
+export LOGSEQ_GRAPH_PATH=/path/to/your/graph
+graphthulhu
+```
+
+Point `--vault` at the graph root (the directory containing `pages/`, `journals/`, and optionally `whiteboards/`). The journal file-name format is read from `logseq/config.edn` when present, falling back to Logseq's default (`yyyy_MM_dd`).
+
+This backend supports full read-write operations and, because it reads the graph's structure directly, also serves the Logseq-only tools that don't depend on a live DataScript engine: `get_references`, flashcards, and whiteboards. Only `query_datalog` remains exclusive to the live Logseq backend.
 
 ### Setup: Obsidian
 
@@ -253,8 +273,9 @@ On startup with the Logseq backend, graphthulhu checks if your graph directory i
 |----------|---------|-------------|
 | `LOGSEQ_API_URL` | `http://127.0.0.1:12315` | Logseq HTTP API endpoint |
 | `LOGSEQ_API_TOKEN` | (required for Logseq) | Bearer token from Logseq settings |
-| `GRAPHTHULHU_BACKEND` | `logseq` | Backend type: `logseq` or `obsidian` |
+| `GRAPHTHULHU_BACKEND` | `logseq` | Backend type: `logseq`, `logseq-offline`, or `obsidian` |
 | `OBSIDIAN_VAULT_PATH` | — | Path to Obsidian vault root |
+| `LOGSEQ_GRAPH_PATH` | — | Path to Logseq graph root (logseq-offline backend) |
 
 ## Architecture
 
@@ -265,7 +286,9 @@ server.go            MCP server setup — conditional tool registration
 backend/backend.go   Backend interface + optional capability interfaces
 client/logseq.go     Logseq HTTP API client with retry/backoff
 vault/
-  vault.go           Obsidian vault client — reads .md files into Backend interface
+  vault.go           File-based vault client — reads .md files into Backend interface
+  format.go          On-disk format strategy (Obsidian vs. Logseq) seam
+  logseq.go          Logseq outliner format: bullets, tab nesting, id:: properties
   markdown.go        Markdown → block tree parser (heading-based sectioning)
   frontmatter.go     YAML frontmatter parser
   index.go           Backlink index builder from [[wikilinks]]
@@ -294,8 +317,9 @@ types/
 - **Full block trees, not flat text.** Every page read returns the complete nested hierarchy with parsed metadata on every block.
 - **Context with every search result.** Search doesn't just return matching blocks — it includes the parent chain and siblings so the AI understands where the result sits.
 - **In-memory graph for analysis.** Analysis tools build the full link graph in memory for BFS, connected components, and gap detection. This keeps per-query latency low.
-- **Optional capability interfaces.** Tools like `query_properties` and `find_by_tag` check if the backend implements `PropertySearcher` or `TagSearcher` at runtime, falling back to DataScript for Logseq. This lets Obsidian use file scanning while Logseq keeps its Datalog queries.
-- **DataScript as escape hatch.** When the built-in tools don't cover a query, `query_datalog` lets you run arbitrary Datalog against the Logseq database.
+- **Optional capability interfaces.** Tools check at runtime which interfaces the backend implements and pick a path accordingly. Search tools like `query_properties` and `find_by_tag` use `PropertySearcher`/`TagSearcher` (Obsidian and offline Logseq scan files/indexes; live Logseq falls back to DataScript). The Logseq-only feature tools gate on finer-grained capabilities — `ReferenceSearcher` (`get_references`), `FlashcardProvider` (flashcards), and `WhiteboardProvider` (whiteboards) — so the offline Logseq backend can serve them from its in-memory index without a live DataScript engine. Only `query_datalog` stays gated on `HasDataScript`.
+- **Two logical backends, one vault client.** Obsidian and offline Logseq are the same `vault.Client` distinguished by a pluggable on-disk `format` (heading sections vs. Logseq outliner). They are told apart at tool-registration time by their lazy wrapper: Obsidian uses `LazyBackend`, offline Logseq uses `LazyLogseqBackend`, which additionally forwards the Logseq-only capability interfaces.
+- **DataScript as escape hatch.** When the built-in tools don't cover a query, `query_datalog` lets you run arbitrary Datalog against the live Logseq database.
 - **Content parsing on every block.** The parser extracts `[[links]]`, `((block refs))`, `#tags`, `key:: value` properties, task markers, and priorities from raw block content.
 - **Heading-based blocks for Obsidian.** Obsidian markdown is sectioned by headings (H1-H6) into a hierarchical block tree. Block UUIDs are persisted via `<!-- id: UUID -->` HTML comments for stability across edits, with deterministic fallback for files without embedded IDs.
 - **File watching.** The Obsidian backend watches the vault directory with fsnotify and selectively re-indexes changed files, keeping the in-memory index in sync with external edits.

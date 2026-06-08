@@ -471,6 +471,126 @@ func TestLogseqInsertChildAfterParentProps(t *testing.T) {
 	}
 }
 
+// TestLogseqGraphFixtureLoad loads the checked-in Logseq graph under
+// testdata/logseq end-to-end and asserts every offline capability surfaces the
+// fixture's content: pages, block references, flashcards, and whiteboards.
+func TestLogseqGraphFixtureLoad(t *testing.T) {
+	c := NewLogseq("testdata/logseq")
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ctx := context.Background()
+
+	pages, err := c.GetAllPages(ctx)
+	if err != nil {
+		t.Fatalf("GetAllPages: %v", err)
+	}
+	byName := make(map[string]types.PageEntity)
+	for _, p := range pages {
+		byName[p.Name] = p
+	}
+	proj, ok := byName["Project"]
+	if !ok {
+		t.Fatalf("Project page not loaded; got pages %v", byName)
+	}
+	if proj.Properties["type"] != "project" {
+		t.Errorf("Project type property = %v, want \"project\"", proj.Properties["type"])
+	}
+
+	// Note's foundational block is referenced once, from Project.
+	refs, err := c.GetBlockReferences(ctx, "11111111-1111-4111-8111-111111111111")
+	if err != nil {
+		t.Fatalf("GetBlockReferences: %v", err)
+	}
+	if len(refs) != 1 || refs[0].Page != "Project" {
+		t.Errorf("expected 1 reference from Project, got %+v", refs)
+	}
+
+	// Two #card blocks: one in Project, one in the journal.
+	cards, err := c.GetFlashcards(ctx)
+	if err != nil {
+		t.Fatalf("GetFlashcards: %v", err)
+	}
+	if len(cards) != 2 {
+		t.Errorf("expected 2 flashcards, got %d: %+v", len(cards), cards)
+	}
+
+	// One whiteboard page under whiteboards/.
+	boards, err := c.GetWhiteboards(ctx)
+	if err != nil {
+		t.Fatalf("GetWhiteboards: %v", err)
+	}
+	if len(boards) != 1 || boards[0].Name != "whiteboards/Canvas" {
+		t.Errorf("expected 1 whiteboard whiteboards/Canvas, got %+v", boards)
+	}
+}
+
+// TestLogseqUUIDStableAcrossReload verifies block identities survive a mutation
+// and a full reload from disk: a block with an explicit id:: keeps its UUID, and
+// a freshly appended block keeps the UUID returned at append time (persisted as
+// an id:: line) when the graph is re-read by a new client.
+func TestLogseqUUIDStableAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stable := "44444444-4444-4444-8444-444444444444"
+	body := "- first block\n  id:: " + stable + "\n- second block no id\n"
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Page.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ctx := context.Background()
+
+	// Capture the auto-assigned (deterministic) UUID of the id-less block.
+	before, err := c.GetPageBlocksTree(ctx, "Page")
+	if err != nil {
+		t.Fatalf("GetPageBlocksTree: %v", err)
+	}
+	var autoUUID string
+	for _, b := range before {
+		if strings.Contains(b.Content, "second block no id") {
+			autoUUID = b.UUID
+		}
+	}
+	if autoUUID == "" {
+		t.Fatalf("id-less block not found: %+v", before)
+	}
+
+	// Append a block — its id:: is persisted to disk.
+	appended, err := c.AppendBlockInPage(ctx, "Page", "third block")
+	if err != nil {
+		t.Fatalf("AppendBlockInPage: %v", err)
+	}
+
+	// Re-read from disk with a fresh client.
+	c2 := NewLogseq(dir)
+	if err := c2.Load(); err != nil {
+		t.Fatalf("reload Load: %v", err)
+	}
+	after, err := c2.GetPageBlocksTree(ctx, "Page")
+	if err != nil {
+		t.Fatalf("reload GetPageBlocksTree: %v", err)
+	}
+	got := make(map[string]string) // content -> uuid
+	for _, b := range after {
+		got[b.Content] = b.UUID
+	}
+	if got["first block"] != stable {
+		t.Errorf("explicit-id block UUID changed across reload: %q want %q", got["first block"], stable)
+	}
+	if got["third block"] != appended.UUID {
+		t.Errorf("appended block UUID not persisted: %q want %q", got["third block"], appended.UUID)
+	}
+	if got["second block no id"] != autoUUID {
+		t.Errorf("id-less block UUID not stable across reload: %q want %q", got["second block no id"], autoUUID)
+	}
+}
+
 func TestLogseqGetWhiteboards(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
