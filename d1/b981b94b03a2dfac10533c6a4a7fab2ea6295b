@@ -1,0 +1,27 @@
+vault/vault.go
+  s_91779caae15c22::t_1db4d61c9e88a1 1171,1176,1178-1179,1190,1192-1193
+  s_91779caae15c22::t_cd05272bd6c3ad 1236,1238-1239,1242-1250,1252-1263
+  s_91779caae15c22::t_038bec8b4c28ce 1240,1251
+  s_91779caae15c22::t_4f1938668bb6cd 1300-1302,1305-1311,1320-1322,1324-1327,1329-1333
+  s_91779caae15c22::t_db6ccc253c837d 1162-1170,1172-1175,1177,1180-1189,1191
+  s_91779caae15c22::t_0ed0f6237812ce 1303,1323
+vault/logseq_test.go
+  s_91779caae15c22::t_39769d01d840a7 621-627
+  s_91779caae15c22::t_450f5f45156428 594-620,628-677
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "d1b981b94b03a2dfac10533c6a4a7fab2ea6295b",
+  "prompts": {},
+  "sessions": {
+    "s_91779caae15c22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cf7b1279-2c0d-461a-a840-b8e3b3aa502d",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Nacho Fernandez <ignacio.fernandez@lovable.dev>"
+    }
+  }
+}
