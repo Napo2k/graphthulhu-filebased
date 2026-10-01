@@ -1159,6 +1159,38 @@ func (c *Client) updateLinksAcrossVaultLocked(oldName, newName string) []error {
 	return errs
 }
 
+// findBlockLine returns the index of the line in lines whose bullet text
+// matches content's first line, or -1 if none matches. content is a block's
+// bare cached text (no bullet marker, no depth prefix), as stored in the
+// index — matching against the bullet's rest (via bulletInfo) rather than a
+// raw substring search avoids matching inside another block's bullet text.
+func findBlockLine(lines []string, content string) int {
+	first := content
+	if i := strings.IndexByte(content, '\n'); i >= 0 {
+		first = content[:i]
+	}
+	for i, line := range lines {
+		if _, isBullet, rest := bulletInfo(line); isBullet && rest == first {
+			return i
+		}
+	}
+	return -1
+}
+
+// blockLineSpan returns the exclusive end index of the block starting at
+// lines[start]: everything up to (but not including) the next line that is a
+// bullet at the same or a shallower depth (a sibling or ancestor), or EOF.
+// This keeps a moved block's own property lines and any children together.
+func blockLineSpan(lines []string, start int) int {
+	depth, _, _ := bulletInfo(lines[start])
+	for i := start + 1; i < len(lines); i++ {
+		if d, isBullet, _ := bulletInfo(lines[i]); isBullet && d <= depth {
+			return i
+		}
+	}
+	return len(lines)
+}
+
 func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, opts map[string]any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1201,14 +1233,34 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 			return fmt.Errorf("read file: %w", err)
 		}
 
-		fileStr := string(existing)
-		fileStr = strings.Replace(fileStr, srcContent+"\n", "", 1)
+		lines := strings.Split(string(existing), "\n")
 
-		if before {
-			fileStr = strings.Replace(fileStr, tgtContent, srcContent+"\n"+tgtContent, 1)
-		} else {
-			fileStr = strings.Replace(fileStr, tgtContent, tgtContent+"\n"+srcContent, 1)
+		srcStart := findBlockLine(lines, srcContent)
+		if srcStart == -1 {
+			return fmt.Errorf("source block content not found in file (may have been modified externally): %s", uuid)
 		}
+		srcEnd := blockLineSpan(lines, srcStart)
+		srcLines := append([]string{}, lines[srcStart:srcEnd]...)
+
+		remaining := make([]string, 0, len(lines)-len(srcLines))
+		remaining = append(remaining, lines[:srcStart]...)
+		remaining = append(remaining, lines[srcEnd:]...)
+
+		tgtStart := findBlockLine(remaining, tgtContent)
+		if tgtStart == -1 {
+			return fmt.Errorf("target block content not found in file (may have been modified externally): %s", targetUUID)
+		}
+		insertAt := tgtStart
+		if !before {
+			insertAt = blockLineSpan(remaining, tgtStart)
+		}
+
+		result := make([]string, 0, len(remaining)+len(srcLines))
+		result = append(result, remaining[:insertAt]...)
+		result = append(result, srcLines...)
+		result = append(result, remaining[insertAt:]...)
+
+		fileStr := strings.Join(result, "\n")
 
 		if err := atomicWrite(absPath, fileStr); err != nil {
 			return fmt.Errorf("write file: %w", err)
@@ -1245,10 +1297,18 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 	if err != nil {
 		return fmt.Errorf("read source file: %w", err)
 	}
-	srcStr := strings.Replace(string(srcFile), srcContent+"\n", "", 1)
-	if srcStr == string(srcFile) {
-		srcStr = strings.Replace(string(srcFile), srcContent, "", 1)
+	srcLines := strings.Split(string(srcFile), "\n")
+	srcStart := findBlockLine(srcLines, srcContent)
+	if srcStart == -1 {
+		return fmt.Errorf("source block content not found in file (may have been modified externally): %s", uuid)
 	}
+	srcEnd := blockLineSpan(srcLines, srcStart)
+	movedLines := append([]string{}, srcLines[srcStart:srcEnd]...)
+
+	remainingSrc := make([]string, 0, len(srcLines)-len(movedLines))
+	remainingSrc = append(remainingSrc, srcLines[:srcStart]...)
+	remainingSrc = append(remainingSrc, srcLines[srcEnd:]...)
+	srcStr := strings.Join(remainingSrc, "\n")
 	if err := atomicWrite(srcAbsPath, srcStr); err != nil {
 		return fmt.Errorf("write source file: %w", err)
 	}
@@ -1257,12 +1317,20 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 	if err != nil {
 		return fmt.Errorf("read target file: %w", err)
 	}
-	tgtStr := string(tgtFile)
-	if before {
-		tgtStr = strings.Replace(tgtStr, tgtContent, srcContent+"\n"+tgtContent, 1)
-	} else {
-		tgtStr = strings.Replace(tgtStr, tgtContent, tgtContent+"\n"+srcContent, 1)
+	tgtLines := strings.Split(string(tgtFile), "\n")
+	tgtStart := findBlockLine(tgtLines, tgtContent)
+	if tgtStart == -1 {
+		return fmt.Errorf("target block content not found in file (may have been modified externally): %s", targetUUID)
 	}
+	insertAt := tgtStart
+	if !before {
+		insertAt = blockLineSpan(tgtLines, tgtStart)
+	}
+	result := make([]string, 0, len(tgtLines)+len(movedLines))
+	result = append(result, tgtLines[:insertAt]...)
+	result = append(result, movedLines...)
+	result = append(result, tgtLines[insertAt:]...)
+	tgtStr := strings.Join(result, "\n")
 	if err := atomicWrite(tgtAbsPath, tgtStr); err != nil {
 		return fmt.Errorf("write target file: %w", err)
 	}

@@ -591,6 +591,90 @@ func TestLogseqUUIDStableAcrossReload(t *testing.T) {
 	}
 }
 
+func TestMoveBlockSamePage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "- first block\n- second block\n- third block\n"
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Page.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ctx := context.Background()
+
+	blocks, err := c.GetPageBlocksTree(ctx, "Page")
+	if err != nil || len(blocks) != 3 {
+		t.Fatalf("GetPageBlocksTree: %d blocks, err %v", len(blocks), err)
+	}
+	first, third := blocks[0].UUID, blocks[2].UUID
+
+	if err := c.MoveBlock(ctx, third, first, map[string]any{"before": true}); err != nil {
+		t.Fatalf("MoveBlock: %v", err)
+	}
+
+	blocks, err = c.GetPageBlocksTree(ctx, "Page")
+	if err != nil || len(blocks) != 3 {
+		t.Fatalf("GetPageBlocksTree after move: %d blocks, err %v", len(blocks), err)
+	}
+	got := []string{blocks[0].Content, blocks[1].Content, blocks[2].Content}
+	want := []string{"third block", "first block", "second block"}
+	if got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Errorf("block order after move = %v, want %v", got, want)
+	}
+}
+
+// TestMoveBlockStaleContentErrors guards against a bug where MoveBlock used
+// strings.Replace to relocate a block without checking whether the cached
+// content actually matched the file. When the in-memory index drifted from
+// disk (e.g. a concurrent writer, or a property line the renderer
+// re-indents differently than the parser stored it), the anchor replace
+// silently no-op'd: the source block got deleted from its old spot and never
+// reinserted anywhere, while MoveBlock still returned success. It must now
+// fail loudly instead of writing a corrupted file.
+func TestMoveBlockStaleContentErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "- first block\n- second block\n"
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Page.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ctx := context.Background()
+
+	blocks, err := c.GetPageBlocksTree(ctx, "Page")
+	if err != nil || len(blocks) != 2 {
+		t.Fatalf("GetPageBlocksTree: %d blocks, err %v", len(blocks), err)
+	}
+	uuid, targetUUID := blocks[0].UUID, blocks[1].UUID
+	srcContent := blocks[0].Content
+
+	// Simulate index drift: the cached target content no longer matches disk.
+	c.blockIndex[targetUUID].block.Content = "this text is not actually in the file"
+
+	if err := c.MoveBlock(ctx, uuid, targetUUID, map[string]any{"before": true}); err == nil {
+		t.Fatal("expected error when cached content doesn't match file, got nil")
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "pages", "Page.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), srcContent) {
+		t.Error("source block content was removed from disk despite the move failing")
+	}
+}
+
 func TestLogseqGetWhiteboards(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
