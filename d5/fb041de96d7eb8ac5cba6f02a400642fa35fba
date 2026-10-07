@@ -1,0 +1,40 @@
+vault/logseq_test.go
+  s_90076afc8269a2::t_8b3ef67b64769c 736-887
+vault/logseq.go
+  s_90076afc8269a2::t_9610daa18134c0 393-402
+vault/format.go
+  s_90076afc8269a2::t_9610daa18134c0 65-75,154-192
+vault/vault.go
+  s_90076afc8269a2::t_ebc59dab2be0df 818,826-828,858,867-869,927,931,1180-1215
+  s_90076afc8269a2::t_a2a8470000146a 804,806,815,846,852,915,921,1158-1179
+  s_90076afc8269a2::t_9b64ca9e1e698b 814,816-817,819-825,854-857,859-866,870,873-878,881,888,891,901,904,906,908,926,928-930,932,1123-1125,1130-1131,1133-1142,1145,1216-1221,1242
+  s_90076afc8269a2::t_e7cb014b79b9c9 831-832,872,944,1146-1157
+  s_90076afc8269a2::t_9610daa18134c0 833,1225,1239-1240,1295,1299,1306,1312,1358,1362,1378,1384
+  s_0b439edeee198e::t_6ccd0453b32e74 871,1222-1224,1234-1238,1241,1244
+vault/vault_test.go
+  s_90076afc8269a2::t_9610daa18134c0 1340-1377
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d5fb041de96d7eb8ac5cba6f02a400642fa35fba",
+  "prompts": {},
+  "sessions": {
+    "s_0b439edeee198e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8470653-dce4-408b-af41-d19f37996f5b",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Nacho Fernandez <ignacio.fernandez@lovable.dev>"
+    },
+    "s_90076afc8269a2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4aa81d1b-96ba-40fd-93be-8bbf903e5931",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Nacho Fernandez <ignacio.fernandez@lovable.dev>"
+    }
+  }
+}
