@@ -390,6 +390,16 @@ func (f *logseqFormat) ChildInsertOffset(fileStr string, contentEnd int, parentL
 	return pos
 }
 
+// BlockStart locates a bullet by its first content line (see findBlockLine).
+func (f *logseqFormat) BlockStart(lines []string, content, uuid string) int {
+	return findBlockLine(lines, content, uuid)
+}
+
+// BlockEnd spans the bullet's property lines and children (see blockLineSpan).
+func (f *logseqFormat) BlockEnd(lines []string, start int) int {
+	return blockLineSpan(lines, start)
+}
+
 // finalizeNode converts a parse node into a BlockEntity, splitting out the
 // id:: UUID and other block properties.
 func finalizeNode(relPath string, n *lsNode) types.BlockEntity {

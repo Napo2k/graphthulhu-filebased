@@ -733,3 +733,155 @@ func TestReadJournalLayout(t *testing.T) {
 		t.Errorf("default journalLayout = %q, want 2006_01_02", f2.journalLayout)
 	}
 }
+
+// logseqEditFixture is an outliner page with nested, multi-line, and
+// duplicate-first-line blocks — the shapes the substring-based editors used
+// to mis-locate on disk (tabs for depth, two-space-aligned continuation and
+// id:: lines).
+const logseqEditFixture = "- parent\n  id:: 11111111-1111-1111-1111-111111111111\n" +
+	"\t- nested one\n\t  id:: 22222222-2222-2222-2222-222222222222\n" +
+	"\t- multi line\n\t  second line\n\t  id:: 33333333-3333-3333-3333-333333333333\n" +
+	"\t\t- grandchild\n" +
+	"- other\n  id:: 44444444-4444-4444-4444-444444444444\n" +
+	"- nested one\n  id:: 55555555-5555-5555-5555-555555555555\n"
+
+func loadLogseqEditFixture(t *testing.T) (*Client, string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "pages", "Page.md")
+	if err := os.WriteFile(path, []byte(logseqEditFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return c, path
+}
+
+func readFixture(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestLogseqUpdateBlockNested(t *testing.T) {
+	c, path := loadLogseqEditFixture(t)
+	ctx := context.Background()
+	const nested = "22222222-2222-2222-2222-222222222222"
+
+	if err := c.UpdateBlock(ctx, nested, "renamed"); err != nil {
+		t.Fatalf("UpdateBlock nested: %v", err)
+	}
+	got := readFixture(t, path)
+	if !strings.Contains(got, "\t- renamed\n\t  id:: "+nested+"\n") {
+		t.Errorf("nested block not rewritten in place with depth + id kept:\n%s", got)
+	}
+	if !strings.Contains(got, "\n- nested one\n  id:: 55555555") {
+		t.Errorf("top-level duplicate-text block was touched:\n%s", got)
+	}
+	if strings.Contains(got, "\nid:: ") {
+		t.Errorf("un-indented id:: line spliced into file:\n%s", got)
+	}
+	blocks, err := c.GetPageBlocksTree(ctx, "Page")
+	if err != nil || len(blocks) != 3 || len(blocks[0].Children) != 2 {
+		t.Fatalf("tree after update: %d roots, err %v", len(blocks), err)
+	}
+	if b := blocks[0].Children[0]; b.UUID != nested || b.Content != "renamed" {
+		t.Errorf("child = %q/%q, want %q/renamed", b.UUID, b.Content, nested)
+	}
+}
+
+func TestLogseqUpdateBlockMultiLine(t *testing.T) {
+	c, path := loadLogseqEditFixture(t)
+	ctx := context.Background()
+	const multi = "33333333-3333-3333-3333-333333333333"
+
+	if err := c.UpdateBlock(ctx, multi, "one\ntwo"); err != nil {
+		t.Fatalf("UpdateBlock multi-line: %v", err)
+	}
+	got := readFixture(t, path)
+	if !strings.Contains(got, "\t- one\n\t  two\n\t  id:: "+multi+"\n\t\t- grandchild\n") {
+		t.Errorf("multi-line block not rewritten with children kept:\n%s", got)
+	}
+	blocks, _ := c.GetPageBlocksTree(ctx, "Page")
+	if b := blocks[0].Children[1]; b.Content != "one\ntwo" || len(b.Children) != 1 {
+		t.Errorf("block = %q with %d children, want one\\ntwo with 1 child", b.Content, len(b.Children))
+	}
+}
+
+func TestLogseqUpdateBlockDuplicateFirstLine(t *testing.T) {
+	c, path := loadLogseqEditFixture(t)
+	ctx := context.Background()
+	const top = "55555555-5555-5555-5555-555555555555"
+
+	if err := c.UpdateBlock(ctx, top, "top renamed"); err != nil {
+		t.Fatalf("UpdateBlock top-level: %v", err)
+	}
+	got := readFixture(t, path)
+	if !strings.Contains(got, "\n- top renamed\n  id:: "+top+"\n") {
+		t.Errorf("top-level block not rewritten:\n%s", got)
+	}
+	if !strings.Contains(got, "\t- nested one\n\t  id:: 22222222") {
+		t.Errorf("nested block with same text was modified instead:\n%s", got)
+	}
+}
+
+func TestLogseqUpdateBlockStaleContentErrors(t *testing.T) {
+	c, path := loadLogseqEditFixture(t)
+	const nested = "22222222-2222-2222-2222-222222222222"
+	c.blockIndex[nested].block.Content = "this text is not actually in the file"
+
+	if err := c.UpdateBlock(context.Background(), nested, "renamed"); err == nil {
+		t.Fatal("expected error for drifted cache, got nil")
+	}
+	if got := readFixture(t, path); got != logseqEditFixture {
+		t.Errorf("file modified despite failed update:\n%s", got)
+	}
+}
+
+func TestLogseqRemoveBlockNested(t *testing.T) {
+	c, path := loadLogseqEditFixture(t)
+	ctx := context.Background()
+	const multi = "33333333-3333-3333-3333-333333333333"
+
+	if err := c.RemoveBlock(ctx, multi); err != nil {
+		t.Fatalf("RemoveBlock: %v", err)
+	}
+	got := readFixture(t, path)
+	if strings.Contains(got, "multi line") || strings.Contains(got, "grandchild") {
+		t.Errorf("block or its children still on disk:\n%s", got)
+	}
+	if !strings.Contains(got, "\t- nested one\n\t  id:: 22222222") || !strings.Contains(got, "- other\n") {
+		t.Errorf("neighbouring blocks damaged:\n%s", got)
+	}
+	blocks, _ := c.GetPageBlocksTree(ctx, "Page")
+	if len(blocks) != 3 || len(blocks[0].Children) != 1 {
+		t.Errorf("tree after remove: %d roots, parent has %d children", len(blocks), len(blocks[0].Children))
+	}
+}
+
+func TestLogseqInsertBlockUnderNestedParent(t *testing.T) {
+	c, path := loadLogseqEditFixture(t)
+	ctx := context.Background()
+	const nested = "22222222-2222-2222-2222-222222222222"
+
+	kid, err := c.InsertBlock(ctx, nested, "kid", nil)
+	if err != nil {
+		t.Fatalf("InsertBlock: %v", err)
+	}
+	got := readFixture(t, path)
+	if !strings.Contains(got, "\t  id:: "+nested+"\n\t\t- kid\n\t\t  id:: "+kid.UUID+"\n\t- multi line\n") {
+		t.Errorf("child not inserted at depth 2 right after parent's own lines:\n%s", got)
+	}
+	blocks, _ := c.GetPageBlocksTree(ctx, "Page")
+	if p := blocks[0].Children[0]; len(p.Children) != 1 || p.Children[0].Content != "kid" {
+		t.Errorf("parent children = %+v, want one child kid", p.Children)
+	}
+}

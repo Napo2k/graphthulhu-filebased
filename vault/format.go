@@ -62,6 +62,17 @@ type format interface {
 	// de-indented `id::`/property lines that are not part of block.Content) so
 	// the child lands after them but before any existing children.
 	ChildInsertOffset(fileStr string, contentEnd int, parentLine string) int
+
+	// BlockStart returns the index of the line in lines that opens the block
+	// whose cached content and uuid are given, or -1 when it is not on disk.
+	// Used by line-span edits (MoveBlock) that must relocate a whole block,
+	// children included, without substring matching.
+	BlockStart(lines []string, content, uuid string) int
+
+	// BlockEnd returns the exclusive end index of the block starting at
+	// lines[start], including its children: the next sibling/ancestor block
+	// or EOF.
+	BlockEnd(lines []string, start int) int
 }
 
 // obsidianFormat implements format for an Obsidian vault: heading-sectioned
@@ -138,6 +149,45 @@ func (f *obsidianFormat) SplitLeadingProperties(content string) (head, body stri
 		return renderFrontmatter(props), body
 	}
 	return "", content
+}
+
+// BlockStart matches the block's first content line against file lines with
+// any `<!-- id: UUID -->` comment stripped. Among equal lines the one carrying
+// the block's own id wins. A standalone id comment line directly above a
+// non-heading match belongs to the block, so the span starts there.
+func (f *obsidianFormat) BlockStart(lines []string, content, uuid string) int {
+	first, _, _ := strings.Cut(content, "\n")
+	first = strings.TrimSpace(first)
+	found := -1
+	for i, line := range lines {
+		id, clean := extractUUID(line)
+		if strings.TrimSpace(clean) != first {
+			continue
+		}
+		start := i
+		if id == "" && i > 0 {
+			if prevID, rest := extractUUID(lines[i-1]); prevID != "" && rest == "" {
+				id, start = prevID, i-1
+			}
+		}
+		if id == uuid {
+			return start
+		}
+		if found == -1 {
+			found = start
+		}
+	}
+	return found
+}
+
+// BlockEnd spans a heading section through all deeper sub-sections (its
+// children); a pre-heading block runs until the first heading.
+func (f *obsidianFormat) BlockEnd(lines []string, start int) int {
+	lvl := headingLevel(lines[start])
+	return spanUntil(lines, start, func(line string) bool {
+		l := headingLevel(line)
+		return l > 0 && (lvl == 0 || l <= lvl)
+	})
 }
 
 // ChildInsertOffset for Obsidian is contentEnd unchanged: a block's content

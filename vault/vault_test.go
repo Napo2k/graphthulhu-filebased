@@ -1337,3 +1337,41 @@ func TestIncludeHidden_WatcherIndexesHiddenFiles(t *testing.T) {
 		t.Error("file in hidden directory not indexed via watcher with WithIncludeHidden(true)")
 	}
 }
+
+// TestMoveBlockObsidianSamePage: Obsidian blocks are heading sections, so a
+// move must carry the section body and its deeper sub-sections (children)
+// along, located by heading line rather than by Logseq bullets.
+func TestMoveBlockObsidianSamePage(t *testing.T) {
+	dir := t.TempDir()
+	body := "Intro text\n\n# A\na body\n\n## A1\na1 body\n\n# B\nb body\n"
+	if err := os.WriteFile(filepath.Join(dir, "Page.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := New(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ctx := context.Background()
+
+	blocks, err := c.GetPageBlocksTree(ctx, "Page")
+	if err != nil || len(blocks) != 3 {
+		t.Fatalf("GetPageBlocksTree: %d roots, err %v", len(blocks), err)
+	}
+	a, b := blocks[1].UUID, blocks[2].UUID
+
+	if err := c.MoveBlock(ctx, b, a, map[string]any{"before": true}); err != nil {
+		t.Fatalf("MoveBlock: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "Page.md"))
+	want := "Intro text\n\n# B\nb body\n\n# A\na body\n\n## A1\na1 body\n"
+	if string(data) != want {
+		t.Errorf("file after move:\n%s\nwant:\n%s", data, want)
+	}
+	blocks, _ = c.GetPageBlocksTree(ctx, "Page")
+	if len(blocks) != 3 || blocks[1].Content != "# B\nb body" || blocks[2].Content != "# A\na body" {
+		t.Fatalf("roots after move = %+v", blocks)
+	}
+	if len(blocks[2].Children) != 1 || blocks[2].Children[0].Content != "## A1\na1 body" {
+		t.Errorf("A lost its child: %+v", blocks[2].Children)
+	}
+}

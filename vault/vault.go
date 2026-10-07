@@ -801,61 +801,36 @@ func (c *Client) InsertBlock(_ context.Context, srcBlock any, content string, op
 	defer c.mu.Unlock()
 
 	parentUUID := fmt.Sprint(srcBlock)
-	lookup, ok := c.blockIndex[parentUUID]
-	if !ok {
-		return nil, fmt.Errorf("parent block not found: %s", parentUUID)
-	}
-
-	pageName := lookup.page
-	lowerName := strings.ToLower(pageName)
-	cached, ok := c.pages[lowerName]
-	if !ok {
-		return nil, fmt.Errorf("page not found for block: %s", pageName)
-	}
-
-	absPath, err := c.safePath(cached.filePath)
+	lookup, cached, absPath, existing, err := c.blockFile(parentUUID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parent %w", err)
 	}
-	existing, err := os.ReadFile(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("read file: %w", err)
-	}
-
-	parentContent := lookup.block.Content
-	fileStr := string(existing)
-	idx := strings.Index(fileStr, parentContent)
-	if idx < 0 {
-		return nil, fmt.Errorf("could not locate parent block content in file")
-	}
-	insertPos := idx + len(parentContent)
-
-	// The parent's raw on-disk line carries the indentation/heading context the
-	// format needs to nest the child correctly.
-	parentLine := fileStr[strings.LastIndexByte(fileStr[:idx], '\n')+1:]
-	if nl := strings.IndexByte(parentLine, '\n'); nl >= 0 {
-		parentLine = parentLine[:nl]
-	}
-
-	// Advance past the parent's own trailing continuation lines (Logseq id::/
-	// property lines) so the child lands after them, not inside the parent.
-	insertPos = c.format.ChildInsertOffset(fileStr, insertPos, parentLine)
 
 	blockUUID, cleanContent := c.format.ExtractID(content)
 	if blockUUID == "" {
 		blockUUID = generateRandomUUID()
 	}
-	rendered := c.format.RenderChild(parentLine, cleanContent, blockUUID)
 
-	newContent := fileStr[:insertPos] + rendered + fileStr[insertPos:]
-
-	if err := atomicWrite(absPath, newContent); err != nil {
-		return nil, fmt.Errorf("write file: %w", err)
+	parentContent := lookup.block.Content
+	fileStr := existing
+	var newContent string
+	if _, isLogseq := c.format.(*logseqFormat); isLogseq {
+		lines, start := logseqBlockLines(fileStr, parentContent, parentUUID)
+		if start == -1 {
+			return nil, fmt.Errorf("could not locate parent block content in file")
+		}
+		depth, _, _ := bulletInfo(lines[start])
+		// Child lands after the parent's own lines (id::/property/wrapped
+		// lines) and before any existing children.
+		at := blockOwnEnd(lines, start)
+		newContent = spliceLines(lines, at, at, renderLogseqBlock(cleanContent, blockUUID, depth+1))
+	} else if newContent = insertObsidianChild(c.format, fileStr, parentContent, cleanContent, blockUUID); newContent == "" {
+		return nil, fmt.Errorf("could not locate parent block content in file")
 	}
 
-	info, _ := os.Stat(absPath)
-	c.indexFileCore(cached.filePath, newContent, info)
-	c.rebuildLinksLocked()
+	if err := c.writeAndReindex(absPath, cached.filePath, newContent); err != nil {
+		return nil, err
+	}
 
 	if lk, ok := c.blockIndex[blockUUID]; ok {
 		return lk.block, nil
@@ -868,43 +843,52 @@ func (c *Client) UpdateBlock(_ context.Context, uuid string, content string, opt
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lookup, ok := c.blockIndex[uuid]
-	if !ok {
-		return fmt.Errorf("block not found: %s", uuid)
-	}
-
-	pageName := lookup.page
-	lowerName := strings.ToLower(pageName)
-	cached, ok := c.pages[lowerName]
-	if !ok {
-		return fmt.Errorf("page not found: %s", pageName)
-	}
-
-	absPath, err := c.safePath(cached.filePath)
+	lookup, cached, absPath, existing, err := c.blockFile(uuid)
 	if err != nil {
 		return err
 	}
-	existing, err := os.ReadFile(absPath)
-	if err != nil {
-		return fmt.Errorf("read file: %w", err)
-	}
 
 	oldContent := lookup.block.Content
-	fileStr := string(existing)
+	fileStr := existing
 
+	var newContent string
+	// ponytail: Logseq-only line editing via type assertion; lift into format
+	// if Obsidian ever needs line-based edits.
+	if _, isLogseq := c.format.(*logseqFormat); isLogseq {
+		lines, start := logseqBlockLines(fileStr, oldContent, uuid)
+		if start == -1 {
+			return fmt.Errorf("block content not found in file (may have been modified externally)")
+		}
+		depth, _, _ := bulletInfo(lines[start])
+		id, clean := c.format.ExtractID(content)
+		if id == "" {
+			id = uuid
+		}
+		newContent = spliceLines(lines, start, blockOwnEnd(lines, start), renderLogseqBlock(clean, id, depth))
+	} else if newContent = replaceObsidianBlock(c.format, fileStr, oldContent, content, uuid); newContent == "" {
+		return fmt.Errorf("block content not found in file (may have been modified externally)")
+	}
+
+	return c.writeAndReindex(absPath, cached.filePath, newContent)
+}
+
+// replaceObsidianBlock swaps a block's content inside fileStr by substring
+// match (Obsidian blocks are heading sections, located by their text). It
+// returns "" when the cached content is not in the file.
+func replaceObsidianBlock(f format, fileStr, oldContent, content, uuid string) string {
 	// The file might have the UUID embedded, so we need to search for it
 	// We'll look for the old content with or without UUID comment
-	oldContentWithUUID := c.format.EmbedID(oldContent, uuid)
+	oldContentWithUUID := f.EmbedID(oldContent, uuid)
 
 	var oldInFile, newInFile string
 	if strings.Contains(fileStr, oldContentWithUUID) {
 		// File has UUID embedded
 		oldInFile = oldContentWithUUID
 		// Check if new content has a UUID, preserve the original UUID
-		providedUUID, cleanContent := c.format.ExtractID(content)
+		providedUUID, cleanContent := f.ExtractID(content)
 		if providedUUID == "" || providedUUID == uuid {
 			// No UUID provided or same UUID, preserve the block's UUID
-			newInFile = c.format.EmbedID(cleanContent, uuid)
+			newInFile = f.EmbedID(cleanContent, uuid)
 		} else {
 			// Different UUID provided, use the new content as-is
 			newInFile = content
@@ -914,58 +898,38 @@ func (c *Client) UpdateBlock(_ context.Context, uuid string, content string, opt
 		oldInFile = oldContent
 		// Add UUID to new content
 		cleanContent := content
-		if _, extractedClean := c.format.ExtractID(content); extractedClean != content {
+		if _, extractedClean := f.ExtractID(content); extractedClean != content {
 			cleanContent = extractedClean
 		}
-		newInFile = c.format.EmbedID(cleanContent, uuid)
+		newInFile = f.EmbedID(cleanContent, uuid)
 	} else {
-		return fmt.Errorf("block content not found in file (may have been modified externally)")
+		return ""
 	}
-
-	newContent := strings.Replace(fileStr, oldInFile, newInFile, 1)
-	if err := atomicWrite(absPath, newContent); err != nil {
-		return fmt.Errorf("write file: %w", err)
-	}
-
-	info, _ := os.Stat(absPath)
-	c.indexFileCore(cached.filePath, newContent, info)
-	c.rebuildLinksLocked()
-
-	return nil
+	return strings.Replace(fileStr, oldInFile, newInFile, 1)
 }
 
 func (c *Client) RemoveBlock(_ context.Context, uuid string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lookup, ok := c.blockIndex[uuid]
-	if !ok {
-		return fmt.Errorf("block not found: %s", uuid)
-	}
-
-	pageName := lookup.page
-	lowerName := strings.ToLower(pageName)
-	cached, ok := c.pages[lowerName]
-	if !ok {
-		return fmt.Errorf("page not found: %s", pageName)
-	}
-
-	absPath, err := c.safePath(cached.filePath)
+	lookup, cached, absPath, existing, err := c.blockFile(uuid)
 	if err != nil {
 		return err
 	}
-	existing, err := os.ReadFile(absPath)
-	if err != nil {
-		return fmt.Errorf("read file: %w", err)
-	}
 
 	oldContent := lookup.block.Content
-	fileStr := string(existing)
+	fileStr := existing
 
 	oldContentWithUUID := c.format.EmbedID(oldContent, uuid)
 	var newContent string
 
-	if strings.Contains(fileStr, oldContentWithUUID+"\n") {
+	if _, isLogseq := c.format.(*logseqFormat); isLogseq {
+		lines, start := logseqBlockLines(fileStr, oldContent, uuid)
+		if start == -1 {
+			return fmt.Errorf("block content not found in file (may have been modified externally)")
+		}
+		newContent = spliceLines(lines, start, blockLineSpan(lines, start), "")
+	} else if strings.Contains(fileStr, oldContentWithUUID+"\n") {
 		newContent = strings.Replace(fileStr, oldContentWithUUID+"\n", "", 1)
 	} else if strings.Contains(fileStr, oldContentWithUUID) {
 		newContent = strings.Replace(fileStr, oldContentWithUUID, "", 1)
@@ -977,15 +941,7 @@ func (c *Client) RemoveBlock(_ context.Context, uuid string) error {
 		return fmt.Errorf("block content not found in file")
 	}
 
-	if err := atomicWrite(absPath, newContent); err != nil {
-		return fmt.Errorf("write file: %w", err)
-	}
-
-	info, _ := os.Stat(absPath)
-	c.indexFileCore(cached.filePath, newContent, info)
-	c.rebuildLinksLocked()
-
-	return nil
+	return c.writeAndReindex(absPath, cached.filePath, newContent)
 }
 
 func (c *Client) DeletePage(_ context.Context, name string) error {
@@ -1164,17 +1120,109 @@ func (c *Client) updateLinksAcrossVaultLocked(oldName, newName string) []error {
 // bare cached text (no bullet marker, no depth prefix), as stored in the
 // index — matching against the bullet's rest (via bulletInfo) rather than a
 // raw substring search avoids matching inside another block's bullet text.
-func findBlockLine(lines []string, content string) int {
+// When several bullets share the text, the one whose own lines carry
+// `id:: uuid` wins; otherwise the first match is returned.
+func findBlockLine(lines []string, content, uuid string) int {
 	first := content
 	if i := strings.IndexByte(content, '\n'); i >= 0 {
 		first = content[:i]
 	}
+	idLine := "id:: " + uuid
+	found := -1
 	for i, line := range lines {
-		if _, isBullet, rest := bulletInfo(line); isBullet && rest == first {
-			return i
+		if _, isBullet, rest := bulletInfo(line); !isBullet || rest != first {
+			continue
+		}
+		if found == -1 {
+			found = i
+		}
+		for j := i + 1; j < blockOwnEnd(lines, i); j++ {
+			if strings.TrimSpace(lines[j]) == idLine {
+				return i
+			}
 		}
 	}
-	return -1
+	return found
+}
+
+// writeAndReindex atomically writes content to absPath and refreshes the
+// index entry for relPath. Caller must hold c.mu.
+func (c *Client) writeAndReindex(absPath, relPath, content string) error {
+	if err := atomicWrite(absPath, content); err != nil {
+		return fmt.Errorf("write file: %w", err)
+	}
+	info, _ := os.Stat(absPath)
+	c.indexFileCore(relPath, content, info)
+	c.rebuildLinksLocked()
+	return nil
+}
+
+// blockFile resolves a block to its page and reads that page's file from
+// disk (under the vault root via safePath). Caller must hold c.mu.
+func (c *Client) blockFile(uuid string) (lookup *blockLookup, cached *cachedPage, absPath, fileStr string, err error) {
+	lookup, ok := c.blockIndex[uuid]
+	if !ok {
+		return lookup, nil, "", "", fmt.Errorf("block not found: %s", uuid)
+	}
+	cached, ok = c.pages[strings.ToLower(lookup.page)]
+	if !ok {
+		return lookup, nil, "", "", fmt.Errorf("page not found: %s", lookup.page)
+	}
+	absPath, err = c.safePath(cached.filePath)
+	if err != nil {
+		return lookup, nil, "", "", err
+	}
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return lookup, nil, "", "", fmt.Errorf("read file: %w", err)
+	}
+	return lookup, cached, absPath, string(data), nil
+}
+
+// logseqBlockLines splits fileStr into lines and locates the block whose
+// cached content/uuid is given; start is -1 when it is not on disk.
+func logseqBlockLines(fileStr, content, uuid string) (lines []string, start int) {
+	lines = strings.Split(fileStr, "\n")
+	return lines, findBlockLine(lines, content, uuid)
+}
+
+// spliceLines replaces lines[start:end] with repl (rendered block text, or ""
+// to delete) and joins the result back into file content.
+func spliceLines(lines []string, start, end int, repl string) string {
+	out := append([]string{}, lines[:start]...)
+	if repl != "" {
+		out = append(out, strings.Split(repl, "\n")...)
+	}
+	return strings.Join(append(out, lines[end:]...), "\n")
+}
+
+// insertObsidianChild splices childContent (with uuid) under the parent located
+// by substring match on its heading-section content. Returns "" when the
+// parent is not in the file.
+func insertObsidianChild(f format, fileStr, parentContent, childContent, uuid string) string {
+	idx := strings.Index(fileStr, parentContent)
+	if idx < 0 {
+		return ""
+	}
+	insertPos := idx + len(parentContent)
+	// The parent's raw on-disk line carries the heading context the format
+	// needs to nest the child correctly.
+	parentLine := fileStr[strings.LastIndexByte(fileStr[:idx], '\n')+1:]
+	if nl := strings.IndexByte(parentLine, '\n'); nl >= 0 {
+		parentLine = parentLine[:nl]
+	}
+	insertPos = f.ChildInsertOffset(fileStr, insertPos, parentLine)
+	return fileStr[:insertPos] + f.RenderChild(parentLine, childContent, uuid) + fileStr[insertPos:]
+}
+
+// blockOwnEnd returns the exclusive end index of the block's own lines
+// starting at lines[start]: the bullet plus its continuation/property lines,
+// up to the next bullet (child or sibling), a blank line, or EOF.
+func blockOwnEnd(lines []string, start int) int {
+	return spanUntil(lines, start, func(line string) bool {
+		_, isBullet, _ := bulletInfo(line)
+		return isBullet || strings.TrimSpace(line) == ""
+	})
 }
 
 // blockLineSpan returns the exclusive end index of the block starting at
@@ -1183,8 +1231,17 @@ func findBlockLine(lines []string, content string) int {
 // This keeps a moved block's own property lines and any children together.
 func blockLineSpan(lines []string, start int) int {
 	depth, _, _ := bulletInfo(lines[start])
+	return spanUntil(lines, start, func(line string) bool {
+		d, isBullet, _ := bulletInfo(line)
+		return isBullet && d <= depth
+	})
+}
+
+// spanUntil returns the index of the first line after start for which stop
+// is true, or len(lines): the exclusive end of a line span.
+func spanUntil(lines []string, start int, stop func(string) bool) int {
 	for i := start + 1; i < len(lines); i++ {
-		if d, isBullet, _ := bulletInfo(lines[i]); isBullet && d <= depth {
+		if stop(lines[i]) {
 			return i
 		}
 	}
@@ -1235,24 +1292,24 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 
 		lines := strings.Split(string(existing), "\n")
 
-		srcStart := findBlockLine(lines, srcContent)
+		srcStart := c.format.BlockStart(lines, srcContent, uuid)
 		if srcStart == -1 {
 			return fmt.Errorf("source block content not found in file (may have been modified externally): %s", uuid)
 		}
-		srcEnd := blockLineSpan(lines, srcStart)
+		srcEnd := c.format.BlockEnd(lines, srcStart)
 		srcLines := append([]string{}, lines[srcStart:srcEnd]...)
 
 		remaining := make([]string, 0, len(lines)-len(srcLines))
 		remaining = append(remaining, lines[:srcStart]...)
 		remaining = append(remaining, lines[srcEnd:]...)
 
-		tgtStart := findBlockLine(remaining, tgtContent)
+		tgtStart := c.format.BlockStart(remaining, tgtContent, targetUUID)
 		if tgtStart == -1 {
 			return fmt.Errorf("target block content not found in file (may have been modified externally): %s", targetUUID)
 		}
 		insertAt := tgtStart
 		if !before {
-			insertAt = blockLineSpan(remaining, tgtStart)
+			insertAt = c.format.BlockEnd(remaining, tgtStart)
 		}
 
 		result := make([]string, 0, len(remaining)+len(srcLines))
@@ -1298,11 +1355,11 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 		return fmt.Errorf("read source file: %w", err)
 	}
 	srcLines := strings.Split(string(srcFile), "\n")
-	srcStart := findBlockLine(srcLines, srcContent)
+	srcStart := c.format.BlockStart(srcLines, srcContent, uuid)
 	if srcStart == -1 {
 		return fmt.Errorf("source block content not found in file (may have been modified externally): %s", uuid)
 	}
-	srcEnd := blockLineSpan(srcLines, srcStart)
+	srcEnd := c.format.BlockEnd(srcLines, srcStart)
 	movedLines := append([]string{}, srcLines[srcStart:srcEnd]...)
 
 	remainingSrc := make([]string, 0, len(srcLines)-len(movedLines))
@@ -1318,13 +1375,13 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 		return fmt.Errorf("read target file: %w", err)
 	}
 	tgtLines := strings.Split(string(tgtFile), "\n")
-	tgtStart := findBlockLine(tgtLines, tgtContent)
+	tgtStart := c.format.BlockStart(tgtLines, tgtContent, targetUUID)
 	if tgtStart == -1 {
 		return fmt.Errorf("target block content not found in file (may have been modified externally): %s", targetUUID)
 	}
 	insertAt := tgtStart
 	if !before {
-		insertAt = blockLineSpan(tgtLines, tgtStart)
+		insertAt = c.format.BlockEnd(tgtLines, tgtStart)
 	}
 	result := make([]string, 0, len(tgtLines)+len(movedLines))
 	result = append(result, tgtLines[:insertAt]...)
