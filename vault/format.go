@@ -73,6 +73,20 @@ type format interface {
 	// lines[start], including its children: the next sibling/ancestor block
 	// or EOF.
 	BlockEnd(lines []string, start int) int
+
+	// BlockOwnEnd returns the exclusive end of the block's own lines starting
+	// at lines[start], before any children: where a new first child goes.
+	BlockOwnEnd(lines []string, start int) int
+
+	// Depth returns the nesting depth of the block opening at line: tab depth
+	// for a Logseq bullet, heading level for Obsidian (0 for pre-heading text).
+	Depth(line string) int
+
+	// PrepareMove returns a moved block's lines re-nested by delta depth levels
+	// (negative outdents) and ready to splice at the new position: Logseq
+	// shifts leading tabs, Obsidian shifts heading levels and adds the blank
+	// separator lines sections are written with.
+	PrepareMove(lines []string, delta int) []string
 }
 
 // obsidianFormat implements format for an Obsidian vault: heading-sectioned
@@ -188,6 +202,30 @@ func (f *obsidianFormat) BlockEnd(lines []string, start int) int {
 		l := headingLevel(line)
 		return l > 0 && (lvl == 0 || l <= lvl)
 	})
+}
+
+// BlockOwnEnd: a section's own lines end at the next heading of any level.
+func (f *obsidianFormat) BlockOwnEnd(lines []string, start int) int {
+	return spanUntil(lines, start, func(line string) bool { return headingLevel(line) > 0 })
+}
+
+func (f *obsidianFormat) Depth(line string) int {
+	return headingLevel(line)
+}
+
+// PrepareMove shifts every heading in the section by delta levels, clamped to
+// H1..H6 (body lines are untouched), and wraps the section in blank separator
+// lines; insertSpan collapses any it does not need.
+func (f *obsidianFormat) PrepareMove(lines []string, delta int) []string {
+	out := make([]string, 0, len(lines)+2)
+	out = append(out, "")
+	for _, line := range lines {
+		if lvl := headingLevel(line); lvl > 0 && delta != 0 {
+			line = strings.Repeat("#", min(max(lvl+delta, 1), 6)) + strings.TrimLeft(strings.TrimSpace(line), "#")
+		}
+		out = append(out, line)
+	}
+	return append(out, "")
 }
 
 // ChildInsertOffset for Obsidian is contentEnd unchanged: a block's content

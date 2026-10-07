@@ -755,6 +755,10 @@ func loadLogseqEditFixture(t *testing.T) (*Client, string) {
 	if err := os.WriteFile(path, []byte(logseqEditFixture), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	other := "- target\n  id:: 66666666-6666-6666-6666-666666666666\n"
+	if err := os.WriteFile(filepath.Join(dir, "pages", "Other.md"), []byte(other), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	c := NewLogseq(dir)
 	if err := c.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
@@ -883,5 +887,61 @@ func TestLogseqInsertBlockUnderNestedParent(t *testing.T) {
 	blocks, _ := c.GetPageBlocksTree(ctx, "Page")
 	if p := blocks[0].Children[0]; len(p.Children) != 1 || p.Children[0].Content != "kid" {
 		t.Errorf("parent children = %+v, want one child kid", p.Children)
+	}
+}
+
+func TestLogseqMoveBlockChildThenSibling(t *testing.T) {
+	c, path := loadLogseqEditFixture(t)
+	ctx := context.Background()
+	const parent, nested, top = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "55555555-5555-5555-5555-555555555555"
+
+	// move_block's default position: first child of the target, re-indented.
+	if err := c.MoveBlock(ctx, top, nested, map[string]any{"children": true}); err != nil {
+		t.Fatalf("MoveBlock child: %v", err)
+	}
+	got := readFixture(t, path)
+	if !strings.Contains(got, "\t- nested one\n\t  id:: "+nested+"\n\t\t- nested one\n\t\t  id:: "+top+"\n\t- multi line\n") {
+		t.Errorf("not inserted as first child at depth 2:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "- other\n  id:: 44444444-4444-4444-4444-444444444444\n") {
+		t.Errorf("trailing newline or last block damaged:\n%s", got)
+	}
+
+	// Sibling after a top-level block: outdented back to depth 0, after its children.
+	if err := c.MoveBlock(ctx, top, parent, nil); err != nil {
+		t.Fatalf("MoveBlock after: %v", err)
+	}
+	got = readFixture(t, path)
+	if !strings.Contains(got, "\t\t- grandchild\n- nested one\n  id:: "+top+"\n- other\n") {
+		t.Errorf("not placed as depth-0 sibling after parent's subtree:\n%s", got)
+	}
+	blocks, _ := c.GetPageBlocksTree(ctx, "Page")
+	if len(blocks) != 3 || blocks[1].UUID != top || len(blocks[0].Children) != 2 {
+		t.Errorf("tree = %d roots, roots[1]=%s, parent children=%d", len(blocks), blocks[1].UUID, len(blocks[0].Children))
+	}
+}
+
+func TestLogseqMoveBlockCrossPage(t *testing.T) {
+	c, path := loadLogseqEditFixture(t)
+	ctx := context.Background()
+	const nested, target = "22222222-2222-2222-2222-222222222222", "66666666-6666-6666-6666-666666666666"
+
+	if err := c.MoveBlock(ctx, nested, target, map[string]any{"children": true}); err != nil {
+		t.Fatalf("MoveBlock cross-page: %v", err)
+	}
+	if got := readFixture(t, path); strings.Contains(got, nested) {
+		t.Errorf("block still in source page:\n%s", got)
+	}
+	other := readFixture(t, filepath.Join(filepath.Dir(path), "Other.md"))
+	if other != "- target\n  id:: "+target+"\n\t- nested one\n\t  id:: "+nested+"\n" {
+		t.Errorf("target page:\n%s", other)
+	}
+	blocks, _ := c.GetPageBlocksTree(ctx, "Other")
+	if len(blocks) != 1 || len(blocks[0].Children) != 1 || blocks[0].Children[0].UUID != nested {
+		t.Errorf("target tree = %+v", blocks)
+	}
+	page, _ := c.GetPageBlocksTree(ctx, "Page")
+	if len(page[0].Children) != 1 {
+		t.Errorf("source parent children = %d, want 1", len(page[0].Children))
 	}
 }

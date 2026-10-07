@@ -400,6 +400,37 @@ func (f *logseqFormat) BlockEnd(lines []string, start int) int {
 	return blockLineSpan(lines, start)
 }
 
+// BlockOwnEnd: the bullet plus its continuation/property lines (see blockOwnEnd).
+func (f *logseqFormat) BlockOwnEnd(lines []string, start int) int {
+	return blockOwnEnd(lines, start)
+}
+
+func (f *logseqFormat) Depth(line string) int {
+	d, _, _ := bulletInfo(line)
+	return d
+}
+
+// PrepareMove re-nests the block by adding or removing delta leading tabs on
+// every non-blank line (never below depth 0).
+func (f *logseqFormat) PrepareMove(lines []string, delta int) []string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		switch {
+		case strings.TrimSpace(line) == "" || delta == 0:
+			out[i] = line
+		case delta > 0:
+			out[i] = strings.Repeat("\t", delta) + line
+		default:
+			k := 0
+			for k < -delta && k < len(line) && line[k] == '\t' {
+				k++
+			}
+			out[i] = line[k:]
+		}
+	}
+	return out
+}
+
 // finalizeNode converts a parse node into a BlockEntity, splitting out the
 // id:: UUID and other block properties.
 func finalizeNode(relPath string, n *lsNode) types.BlockEntity {

@@ -1196,6 +1196,33 @@ func spliceLines(lines []string, start, end int, repl string) string {
 	return strings.Join(append(out, lines[end:]...), "\n")
 }
 
+// insertSpan inserts moved at index at and tidies the joins: an insert at EOF
+// goes before the file's trailing-newline marker, a doubled blank line at
+// either boundary collapses to one, a blank line is never left at the top of
+// the file, and the result ends with exactly one trailing newline.
+func insertSpan(lines []string, at int, moved []string) []string {
+	blank := func(s string) bool { return strings.TrimSpace(s) == "" }
+	if at == len(lines) && at > 0 && blank(lines[at-1]) {
+		at--
+	}
+	out := append(append(append([]string{}, lines[:at]...), moved...), lines[at:]...)
+	for _, i := range []int{at + len(moved), at} { // end boundary first so at stays valid
+		if i > 0 && i < len(out) && blank(out[i-1]) && blank(out[i]) {
+			out = append(out[:i-1], out[i:]...)
+		}
+	}
+	for at == 0 && len(out) > 0 && blank(out[0]) {
+		out = out[1:]
+	}
+	for len(out) > 1 && blank(out[len(out)-1]) && blank(out[len(out)-2]) {
+		out = out[:len(out)-1]
+	}
+	if len(out) == 0 || out[len(out)-1] != "" {
+		out = append(out, "")
+	}
+	return out
+}
+
 // insertObsidianChild splices childContent (with uuid) under the parent located
 // by substring match on its heading-section content. Returns "" when the
 // parent is not in the file.
@@ -1252,152 +1279,71 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	srcLookup, ok := c.blockIndex[uuid]
-	if !ok {
-		return fmt.Errorf("source block not found: %s", uuid)
-	}
-	tgtLookup, ok := c.blockIndex[targetUUID]
-	if !ok {
-		return fmt.Errorf("target block not found: %s", targetUUID)
+	position := "after"
+	if b, _ := opts["before"].(bool); b {
+		position = "before"
+	} else if ch, _ := opts["children"].(bool); ch {
+		position = "child"
 	}
 
-	srcPage := srcLookup.page
-	tgtPage := tgtLookup.page
-	srcContent := srcLookup.block.Content
-	tgtContent := tgtLookup.block.Content
-	samePage := strings.ToLower(srcPage) == strings.ToLower(tgtPage)
-
-	before := false
-	if opts != nil {
-		if b, ok := opts["before"]; ok {
-			before, _ = b.(bool)
-		}
-	}
-
-	if samePage {
-		lowerName := strings.ToLower(srcPage)
-		cached, ok := c.pages[lowerName]
-		if !ok {
-			return fmt.Errorf("page not found: %s", srcPage)
-		}
-
-		absPath, err := c.safePath(cached.filePath)
-		if err != nil {
-			return err
-		}
-		existing, err := os.ReadFile(absPath)
-		if err != nil {
-			return fmt.Errorf("read file: %w", err)
-		}
-
-		lines := strings.Split(string(existing), "\n")
-
-		srcStart := c.format.BlockStart(lines, srcContent, uuid)
-		if srcStart == -1 {
-			return fmt.Errorf("source block content not found in file (may have been modified externally): %s", uuid)
-		}
-		srcEnd := c.format.BlockEnd(lines, srcStart)
-		srcLines := append([]string{}, lines[srcStart:srcEnd]...)
-
-		remaining := make([]string, 0, len(lines)-len(srcLines))
-		remaining = append(remaining, lines[:srcStart]...)
-		remaining = append(remaining, lines[srcEnd:]...)
-
-		tgtStart := c.format.BlockStart(remaining, tgtContent, targetUUID)
-		if tgtStart == -1 {
-			return fmt.Errorf("target block content not found in file (may have been modified externally): %s", targetUUID)
-		}
-		insertAt := tgtStart
-		if !before {
-			insertAt = c.format.BlockEnd(remaining, tgtStart)
-		}
-
-		result := make([]string, 0, len(remaining)+len(srcLines))
-		result = append(result, remaining[:insertAt]...)
-		result = append(result, srcLines...)
-		result = append(result, remaining[insertAt:]...)
-
-		fileStr := strings.Join(result, "\n")
-
-		if err := atomicWrite(absPath, fileStr); err != nil {
-			return fmt.Errorf("write file: %w", err)
-		}
-
-		info, _ := os.Stat(absPath)
-		c.indexFileCore(cached.filePath, fileStr, info)
-		c.rebuildLinksLocked()
-		return nil
-	}
-
-	// Cross-page move.
-	srcLower := strings.ToLower(srcPage)
-	tgtLower := strings.ToLower(tgtPage)
-	srcCached, ok := c.pages[srcLower]
-	if !ok {
-		return fmt.Errorf("source page not found: %s", srcPage)
-	}
-	tgtCached, ok := c.pages[tgtLower]
-	if !ok {
-		return fmt.Errorf("target page not found: %s", tgtPage)
-	}
-
-	srcAbsPath, err := c.safePath(srcCached.filePath)
+	src, srcCached, srcAbs, srcFile, err := c.blockFile(uuid)
 	if err != nil {
-		return err
+		return fmt.Errorf("source %w", err)
 	}
-	tgtAbsPath, err := c.safePath(tgtCached.filePath)
+	tgt, tgtCached, tgtAbs, tgtFile, err := c.blockFile(targetUUID)
 	if err != nil {
-		return err
+		return fmt.Errorf("target %w", err)
 	}
 
-	srcFile, err := os.ReadFile(srcAbsPath)
-	if err != nil {
-		return fmt.Errorf("read source file: %w", err)
-	}
-	srcLines := strings.Split(string(srcFile), "\n")
-	srcStart := c.format.BlockStart(srcLines, srcContent, uuid)
+	srcLines := strings.Split(srcFile, "\n")
+	srcStart := c.format.BlockStart(srcLines, src.block.Content, uuid)
 	if srcStart == -1 {
 		return fmt.Errorf("source block content not found in file (may have been modified externally): %s", uuid)
 	}
 	srcEnd := c.format.BlockEnd(srcLines, srcStart)
-	movedLines := append([]string{}, srcLines[srcStart:srcEnd]...)
-
-	remainingSrc := make([]string, 0, len(srcLines)-len(movedLines))
-	remainingSrc = append(remainingSrc, srcLines[:srcStart]...)
-	remainingSrc = append(remainingSrc, srcLines[srcEnd:]...)
-	srcStr := strings.Join(remainingSrc, "\n")
-	if err := atomicWrite(srcAbsPath, srcStr); err != nil {
-		return fmt.Errorf("write source file: %w", err)
+	for srcEnd > srcStart+1 && strings.TrimSpace(srcLines[srcEnd-1]) == "" {
+		srcEnd-- // trailing blank lines stay behind as the separator
+	}
+	moved := append([]string{}, srcLines[srcStart:srcEnd]...)
+	srcDepth := c.format.Depth(srcLines[srcStart])
+	remaining := append(append([]string{}, srcLines[:srcStart]...), srcLines[srcEnd:]...)
+	if i := srcStart; i > 0 && i < len(remaining) && strings.TrimSpace(remaining[i-1]) == "" && strings.TrimSpace(remaining[i]) == "" {
+		remaining = append(remaining[:i-1], remaining[i:]...) // collapse the doubled separator left at the seam
 	}
 
-	tgtFile, err := os.ReadFile(tgtAbsPath)
-	if err != nil {
-		return fmt.Errorf("read target file: %w", err)
+	// Same page: locate the target in the lines left after the removal so the
+	// insert index already accounts for it.
+	samePage := strings.EqualFold(src.page, tgt.page)
+	tgtLines := remaining
+	if !samePage {
+		tgtLines = strings.Split(tgtFile, "\n")
 	}
-	tgtLines := strings.Split(string(tgtFile), "\n")
-	tgtStart := c.format.BlockStart(tgtLines, tgtContent, targetUUID)
+	tgtStart := c.format.BlockStart(tgtLines, tgt.block.Content, targetUUID)
 	if tgtStart == -1 {
 		return fmt.Errorf("target block content not found in file (may have been modified externally): %s", targetUUID)
 	}
-	insertAt := tgtStart
-	if !before {
-		insertAt = c.format.BlockEnd(tgtLines, tgtStart)
-	}
-	result := make([]string, 0, len(tgtLines)+len(movedLines))
-	result = append(result, tgtLines[:insertAt]...)
-	result = append(result, movedLines...)
-	result = append(result, tgtLines[insertAt:]...)
-	tgtStr := strings.Join(result, "\n")
-	if err := atomicWrite(tgtAbsPath, tgtStr); err != nil {
-		return fmt.Errorf("write target file: %w", err)
-	}
+	tgtDepth := c.format.Depth(tgtLines[tgtStart])
 
-	srcInfo, _ := os.Stat(srcAbsPath)
-	c.indexFileCore(srcCached.filePath, srcStr, srcInfo)
-	tgtInfo, _ := os.Stat(tgtAbsPath)
-	c.indexFileCore(tgtCached.filePath, tgtStr, tgtInfo)
-	c.rebuildLinksLocked()
+	var at, depth int
+	switch position {
+	case "before":
+		at, depth = tgtStart, tgtDepth
+	case "child":
+		at, depth = c.format.BlockOwnEnd(tgtLines, tgtStart), tgtDepth+1 // first child
+	default:
+		at, depth = c.format.BlockEnd(tgtLines, tgtStart), tgtDepth // sibling after target and its children
+	}
+	result := strings.Join(insertSpan(tgtLines, at, c.format.PrepareMove(moved, depth-srcDepth)), "\n")
 
+	if samePage {
+		return c.writeAndReindex(tgtAbs, tgtCached.filePath, result)
+	}
+	if err := c.writeAndReindex(srcAbs, srcCached.filePath, strings.Join(remaining, "\n")); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if err := c.writeAndReindex(tgtAbs, tgtCached.filePath, result); err != nil {
+		return fmt.Errorf("target: %w", err)
+	}
 	return nil
 }
 
