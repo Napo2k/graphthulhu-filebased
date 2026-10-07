@@ -1,0 +1,19 @@
+README.md
+  s_90076afc8269a2::t_9610daa18134c0 249-266
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cae698e08e50fca767a1f3fd59740a545074fd55",
+  "prompts": {},
+  "sessions": {
+    "s_90076afc8269a2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4aa81d1b-96ba-40fd-93be-8bbf903e5931",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Nacho Fernandez <ignacio.fernandez@lovable.dev>"
+    }
+  }
+}
