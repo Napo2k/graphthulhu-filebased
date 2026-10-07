@@ -246,6 +246,24 @@ No running Logseq, HTTP server, or token — point it at the graph directory on 
 }
 ```
 
+### One shared instance over HTTP
+
+Every stdio client (each Claude Code session, each editor window) spawns its own `graphthulhu` process, and each one indexes and watches the whole graph. To share a single index, run one server over streamable HTTP and point every client at it:
+
+```bash
+graphthulhu serve --backend logseq-offline --vault /path/to/your/graph --http 127.0.0.1:8787
+```
+
+```json
+{
+  "mcpServers": {
+    "graphthulhu": { "type": "http", "url": "http://127.0.0.1:8787/mcp" }
+  }
+}
+```
+
+The HTTP transport has no authentication: bind to `127.0.0.1` only. On macOS a `launchd` agent with `KeepAlive` keeps it running. After rebuilding the binary, restart it (`launchctl kickstart -k gui/$(id -u)/<label>`) and reconnect running MCP clients: their sessions lived in the old process.
+
 ### Obsidian — Claude Code
 
 ```json
