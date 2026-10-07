@@ -1,0 +1,29 @@
+vault/format.go
+  s_90076afc8269a2::t_79ffd85b936f3c 76-89,207-228
+  s_90076afc8269a2::t_f4463ad9a3504d 229-230
+vault/logseq.go
+  s_90076afc8269a2::t_79ffd85b936f3c 403-433
+vault/vault.go
+  s_90076afc8269a2::t_79ffd85b936f3c 1206,1213,1216,1282-1286,1289,1291,1293,1295,1298-1299,1304-1311,1314-1319,1321,1325,1327-1336,1338-1346
+  s_90076afc8269a2::t_6f539f54b24cbe 1199-1205,1207-1212,1214-1215,1217-1225
+vault/logseq_test.go
+  s_90076afc8269a2::t_79ffd85b936f3c 758-761,892-947
+vault/vault_test.go
+  s_90076afc8269a2::t_3ef2677a1fe621 1341-1379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f06fae55764ecbefbbef6c397a8baa18e72f84c6",
+  "prompts": {},
+  "sessions": {
+    "s_90076afc8269a2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4aa81d1b-96ba-40fd-93be-8bbf903e5931",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Nacho Fernandez <ignacio.fernandez@lovable.dev>"
+    }
+  }
+}
