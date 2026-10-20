@@ -23,6 +23,11 @@ type format interface {
 	// PageFilePath returns the vault-relative file path for a page name.
 	PageFilePath(name string) string
 
+	// CanonicalName maps a page name to the name the index stores it under:
+	// Logseq resolves a journal date in any configured format to its ISO
+	// name; Obsidian returns name unchanged.
+	CanonicalName(name string) string
+
 	// NewPageContent renders the initial file contents for a new page created
 	// with the given properties (empty string when there is nothing to write).
 	NewPageContent(properties map[string]any) string
@@ -67,7 +72,7 @@ type format interface {
 	// whose cached content and uuid are given, or -1 when it is not on disk.
 	// Used by line-span edits (MoveBlock) that must relocate a whole block,
 	// children included, without substring matching.
-	BlockStart(lines []string, content, uuid string) int
+	BlockStart(lines []string, relPath, content, uuid string) int
 
 	// BlockEnd returns the exclusive end index of the block starting at
 	// lines[start], including its children: the next sibling/ancestor block
@@ -127,6 +132,8 @@ func (f *obsidianFormat) Parse(relPath, content string, info os.FileInfo) *cache
 	}
 }
 
+func (f *obsidianFormat) CanonicalName(name string) string { return name }
+
 func (f *obsidianFormat) PageFilePath(name string) string {
 	return name + ".md"
 }
@@ -169,7 +176,7 @@ func (f *obsidianFormat) SplitLeadingProperties(content string) (head, body stri
 // any `<!-- id: UUID -->` comment stripped. Among equal lines the one carrying
 // the block's own id wins. A standalone id comment line directly above a
 // non-heading match belongs to the block, so the span starts there.
-func (f *obsidianFormat) BlockStart(lines []string, content, uuid string) int {
+func (f *obsidianFormat) BlockStart(lines []string, _, content, uuid string) int {
 	first, _, _ := strings.Cut(content, "\n")
 	first = strings.TrimSpace(first)
 	found := -1

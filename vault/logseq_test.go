@@ -945,3 +945,135 @@ func TestLogseqMoveBlockCrossPage(t *testing.T) {
 		t.Errorf("source parent children = %d, want 1", len(page[0].Children))
 	}
 }
+
+// newLogseqGraph writes files (vault-relative path -> body) and loads a client.
+func newLogseqGraph(t *testing.T, files map[string]string) (*Client, string) {
+	t.Helper()
+	dir := t.TempDir()
+	for rel, body := range files {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := NewLogseq(dir)
+	if err := c.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return c, dir
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// stripIDs drops `id::` lines so assertions see only the outline shape.
+func stripIDs(s string) string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(l), "id:: ") {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func TestLogseqAppendNestedBulletsKeepIndentation(t *testing.T) {
+	c, dir := newLogseqGraph(t, map[string]string{"pages/P.md": ""})
+	ctx := context.Background()
+	for _, content := range []string{
+		"## Overview\n\t- Company: Polar\n\t\t- detail\n\t- Status: applied",
+		"Spaces\n  - two-space child\n    - grandchild",
+	} {
+		if _, err := c.AppendBlockInPage(ctx, "P", content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := stripIDs(readFile(t, filepath.Join(dir, "pages", "P.md")))
+	want := "- ## Overview\n\t- Company: Polar\n\t\t- detail\n\t- Status: applied\n" +
+		"- Spaces\n\t- two-space child\n\t\t- grandchild\n"
+	if got != want {
+		t.Errorf("file =\n%q\nwant\n%q", got, want)
+	}
+	blocks, _ := c.GetPageBlocksTree(ctx, "P")
+	if len(blocks) != 2 || len(blocks[0].Children) != 2 || blocks[0].Children[0].Content != "Company: Polar" {
+		t.Fatalf("tree = %+v", blocks)
+	}
+	// The parent's id:: line sits with the parent, not its last child.
+	if blocks[0].Children[1].UUID == blocks[0].UUID {
+		t.Error("parent id leaked onto child")
+	}
+}
+
+func TestLogseqInsertBlockKeepsChildOrder(t *testing.T) {
+	c, dir := newLogseqGraph(t, map[string]string{"pages/P.md": "- parent\n  id:: 11111111-1111-1111-1111-111111111111\n- next\n"})
+	ctx := context.Background()
+	for _, s := range []string{"a", "b", "c"} {
+		if _, err := c.InsertBlock(ctx, "11111111-1111-1111-1111-111111111111", s, map[string]any{"sibling": false}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := stripIDs(readFile(t, filepath.Join(dir, "pages", "P.md")))
+	if want := "- parent\n\t- a\n\t- b\n\t- c\n- next\n"; got != want {
+		t.Errorf("file = %q, want %q", got, want)
+	}
+}
+
+// Each update pins its block with an id:: line; that extra line must not shift
+// the fallback UUIDs of later id-less blocks onto their neighbours.
+func TestLogseqUpdateBatchDoesNotDrift(t *testing.T) {
+	c, dir := newLogseqGraph(t, map[string]string{"pages/P.md": "- one\n- two\n- three\n- four\n"})
+	ctx := context.Background()
+	blocks, _ := c.GetPageBlocksTree(ctx, "P")
+	uuids := []string{blocks[0].UUID, blocks[1].UUID, blocks[2].UUID, blocks[3].UUID}
+	for i, want := range []string{"ONE", "TWO", "THREE", "FOUR"} {
+		if err := c.UpdateBlock(ctx, uuids[i], want); err != nil {
+			t.Fatalf("update %d: %v", i, err)
+		}
+	}
+	if got := stripIDs(readFile(t, filepath.Join(dir, "pages", "P.md"))); got != "- ONE\n- TWO\n- THREE\n- FOUR\n" {
+		t.Errorf("file = %q", got)
+	}
+}
+
+func TestLogseqUpdateDuplicateTextTargetsRightBlock(t *testing.T) {
+	c, dir := newLogseqGraph(t, map[string]string{"pages/P.md": "- Overview\n\t- a\n- Overview\n\t- b\n"})
+	ctx := context.Background()
+	blocks, _ := c.GetPageBlocksTree(ctx, "P")
+	if err := c.UpdateBlock(ctx, blocks[1].UUID, "Overview 2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := stripIDs(readFile(t, filepath.Join(dir, "pages", "P.md"))); got != "- Overview\n\t- a\n- Overview 2\n\t- b\n" {
+		t.Errorf("file = %q", got)
+	}
+}
+
+func TestLogseqJournalNameResolution(t *testing.T) {
+	c, dir := newLogseqGraph(t, map[string]string{
+		"logseq/config.edn":      `{:journal/page-title-format "EEEE, dd.MM.yyyy" :journal/file-name-format "yyyy_MM_dd"}`,
+		"journals/2026_10_12.md": "- existing\n",
+	})
+	ctx := context.Background()
+	for _, name := range []string{"2026-10-12", "2026_10_12", "Monday, 12.10.2026", "monday, 12.10.2026"} {
+		if p, _ := c.GetPage(ctx, name); p == nil || p.Name != "2026-10-12" {
+			t.Errorf("GetPage(%q) = %+v", name, p)
+		}
+	}
+	if _, err := c.AppendBlockInPage(ctx, "Tuesday, 13.10.2026", "new day"); err != nil {
+		t.Fatal(err)
+	}
+	if got := stripIDs(readFile(t, filepath.Join(dir, "journals", "2026_10_13.md"))); got != "- new day\n" {
+		t.Errorf("journal file = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pages")); err == nil {
+		t.Error("journal append created a pages/ file")
+	}
+}

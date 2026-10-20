@@ -413,7 +413,7 @@ func (c *Client) GetPage(_ context.Context, nameOrID any) (*types.PageEntity, er
 	defer c.mu.RUnlock()
 
 	name := fmt.Sprint(nameOrID)
-	page, ok := c.pages[strings.ToLower(name)]
+	page, ok := c.pages[c.pageKey(name)]
 	if !ok {
 		return nil, nil
 	}
@@ -425,7 +425,7 @@ func (c *Client) GetPageBlocksTree(_ context.Context, nameOrID any) ([]types.Blo
 	defer c.mu.RUnlock()
 
 	name := fmt.Sprint(nameOrID)
-	page, ok := c.pages[strings.ToLower(name)]
+	page, ok := c.pages[c.pageKey(name)]
 	if !ok {
 		return nil, nil
 	}
@@ -608,6 +608,11 @@ func (c *Client) DatascriptQuery(_ context.Context, query string, inputs ...any)
 	return nil, ErrNotSupported
 }
 
+// pageKey is the c.pages key for a page name (see format.CanonicalName).
+func (c *Client) pageKey(name string) string {
+	return strings.ToLower(c.format.CanonicalName(name))
+}
+
 // --- Write operations ---
 
 func (c *Client) CreatePage(_ context.Context, name string, properties map[string]any, opts map[string]any) (*types.PageEntity, error) {
@@ -618,7 +623,7 @@ func (c *Client) CreatePage(_ context.Context, name string, properties map[strin
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lowerName := strings.ToLower(name)
+	lowerName := c.pageKey(name)
 	if _, exists := c.pages[lowerName]; exists {
 		return nil, fmt.Errorf("page already exists: %s", name)
 	}
@@ -658,7 +663,7 @@ func (c *Client) AppendBlockInPage(_ context.Context, page string, content strin
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lowerName := strings.ToLower(page)
+	lowerName := c.pageKey(page)
 	cached, exists := c.pages[lowerName]
 
 	var absPath string
@@ -733,7 +738,7 @@ func (c *Client) PrependBlockInPage(_ context.Context, page string, content stri
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lowerName := strings.ToLower(page)
+	lowerName := c.pageKey(page)
 	cached, exists := c.pages[lowerName]
 
 	blockUUID, cleanContent := c.format.ExtractID(content)
@@ -815,14 +820,17 @@ func (c *Client) InsertBlock(_ context.Context, srcBlock any, content string, op
 	fileStr := existing
 	var newContent string
 	if _, isLogseq := c.format.(*logseqFormat); isLogseq {
-		lines, start := logseqBlockLines(fileStr, parentContent, parentUUID)
+		lines, start := logseqBlockLines(fileStr, cached.filePath, parentContent, parentUUID)
 		if start == -1 {
 			return nil, fmt.Errorf("could not locate parent block content in file")
 		}
 		depth, _, _ := bulletInfo(lines[start])
-		// Child lands after the parent's own lines (id::/property/wrapped
-		// lines) and before any existing children.
-		at := blockOwnEnd(lines, start)
+		// Child lands as the parent's last child (after its subtree), matching
+		// live Logseq's insertBlock, so successive inserts keep their order.
+		at := blockLineSpan(lines, start)
+		for at > start+1 && strings.TrimSpace(lines[at-1]) == "" {
+			at-- // the separator blank line stays after the new child
+		}
 		newContent = spliceLines(lines, at, at, renderLogseqBlock(cleanContent, blockUUID, depth+1))
 	} else if newContent = insertObsidianChild(c.format, fileStr, parentContent, cleanContent, blockUUID); newContent == "" {
 		return nil, fmt.Errorf("could not locate parent block content in file")
@@ -855,7 +863,7 @@ func (c *Client) UpdateBlock(_ context.Context, uuid string, content string, opt
 	// ponytail: Logseq-only line editing via type assertion; lift into format
 	// if Obsidian ever needs line-based edits.
 	if _, isLogseq := c.format.(*logseqFormat); isLogseq {
-		lines, start := logseqBlockLines(fileStr, oldContent, uuid)
+		lines, start := logseqBlockLines(fileStr, cached.filePath, oldContent, uuid)
 		if start == -1 {
 			return fmt.Errorf("block content not found in file (may have been modified externally)")
 		}
@@ -924,7 +932,7 @@ func (c *Client) RemoveBlock(_ context.Context, uuid string) error {
 	var newContent string
 
 	if _, isLogseq := c.format.(*logseqFormat); isLogseq {
-		lines, start := logseqBlockLines(fileStr, oldContent, uuid)
+		lines, start := logseqBlockLines(fileStr, cached.filePath, oldContent, uuid)
 		if start == -1 {
 			return fmt.Errorf("block content not found in file (may have been modified externally)")
 		}
@@ -948,7 +956,7 @@ func (c *Client) DeletePage(_ context.Context, name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lowerName := strings.ToLower(name)
+	lowerName := c.pageKey(name)
 	cached, ok := c.pages[lowerName]
 	if !ok {
 		return fmt.Errorf("page not found: %s", name)
@@ -989,13 +997,13 @@ func (c *Client) RenamePage(_ context.Context, oldName, newName string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	lowerOld := strings.ToLower(oldName)
+	lowerOld := c.pageKey(oldName)
 	cached, ok := c.pages[lowerOld]
 	if !ok {
 		return fmt.Errorf("page not found: %s", oldName)
 	}
 
-	lowerNew := strings.ToLower(newName)
+	lowerNew := c.pageKey(newName)
 	if _, exists := c.pages[lowerNew]; exists {
 		return fmt.Errorf("target page already exists: %s", newName)
 	}
@@ -1072,7 +1080,7 @@ func (c *Client) removeBlocksFromIndexLocked(blocks []types.BlockEntity) {
 func (c *Client) updateLinksAcrossVaultLocked(oldName, newName string) []error {
 	oldLink := "[[" + oldName + "]]"
 	newLink := "[[" + newName + "]]"
-	lowerOld := strings.ToLower(oldName)
+	lowerOld := c.pageKey(oldName)
 
 	var errs []error
 	seen := make(map[string]bool)
@@ -1121,21 +1129,23 @@ func (c *Client) updateLinksAcrossVaultLocked(oldName, newName string) []error {
 // index — matching against the bullet's rest (via bulletInfo) rather than a
 // raw substring search avoids matching inside another block's bullet text.
 // When several bullets share the text, the one whose own lines carry
-// `id:: uuid` wins; otherwise the first match is returned.
-func findBlockLine(lines []string, content, uuid string) int {
+// `id:: uuid` wins, then the one whose fallback UUID is uuid; otherwise the
+// first match is returned.
+func findBlockLine(lines []string, relPath, content, uuid string) int {
 	first := content
 	if i := strings.IndexByte(content, '\n'); i >= 0 {
 		first = content[:i]
 	}
 	idLine := "id:: " + uuid
-	found := -1
+	found, nth := -1, 0
 	for i, line := range lines {
 		if _, isBullet, rest := bulletInfo(line); !isBullet || rest != first {
 			continue
 		}
-		if found == -1 {
+		if found == -1 || logseqFallbackUUID(relPath, first, nth) == uuid {
 			found = i
 		}
+		nth++
 		for j := i + 1; j < blockOwnEnd(lines, i); j++ {
 			if strings.TrimSpace(lines[j]) == idLine {
 				return i
@@ -1181,9 +1191,9 @@ func (c *Client) blockFile(uuid string) (lookup *blockLookup, cached *cachedPage
 
 // logseqBlockLines splits fileStr into lines and locates the block whose
 // cached content/uuid is given; start is -1 when it is not on disk.
-func logseqBlockLines(fileStr, content, uuid string) (lines []string, start int) {
+func logseqBlockLines(fileStr, relPath, content, uuid string) (lines []string, start int) {
 	lines = strings.Split(fileStr, "\n")
-	return lines, findBlockLine(lines, content, uuid)
+	return lines, findBlockLine(lines, relPath, content, uuid)
 }
 
 // spliceLines replaces lines[start:end] with repl (rendered block text, or ""
@@ -1296,7 +1306,7 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 	}
 
 	srcLines := strings.Split(srcFile, "\n")
-	srcStart := c.format.BlockStart(srcLines, src.block.Content, uuid)
+	srcStart := c.format.BlockStart(srcLines, srcCached.filePath, src.block.Content, uuid)
 	if srcStart == -1 {
 		return fmt.Errorf("source block content not found in file (may have been modified externally): %s", uuid)
 	}
@@ -1318,7 +1328,7 @@ func (c *Client) MoveBlock(_ context.Context, uuid string, targetUUID string, op
 	if !samePage {
 		tgtLines = strings.Split(tgtFile, "\n")
 	}
-	tgtStart := c.format.BlockStart(tgtLines, tgt.block.Content, targetUUID)
+	tgtStart := c.format.BlockStart(tgtLines, tgtCached.filePath, tgt.block.Content, targetUUID)
 	if tgtStart == -1 {
 		return fmt.Errorf("target block content not found in file (may have been modified externally): %s", targetUUID)
 	}

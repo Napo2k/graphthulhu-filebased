@@ -21,6 +21,9 @@ type logseqFormat struct {
 	// journalLayout is the Go time layout that matches the vault's
 	// :journal/file-name-format (default "2006_01_02").
 	journalLayout string
+	// titleLayout is the Go layout for :journal/page-title-format, or ""
+	// when unset or not translatable.
+	titleLayout string
 }
 
 var _ format = (*logseqFormat)(nil)
@@ -30,9 +33,10 @@ var _ format = (*logseqFormat)(nil)
 // falls back to Logseq's default.
 func newLogseqFormat(vaultPath string) *logseqFormat {
 	f := &logseqFormat{journalLayout: "2006_01_02"}
-	if layout := readJournalLayout(vaultPath); layout != "" {
+	if layout := readConfigLayout(vaultPath, journalFormatPattern); layout != "" {
 		f.journalLayout = layout
 	}
+	f.titleLayout = readConfigLayout(vaultPath, journalTitlePattern)
 	return f
 }
 
@@ -98,9 +102,28 @@ func (f *logseqFormat) pageIdentity(slashPath string) (name string, isJournal bo
 }
 
 // PageFilePath maps a page name to its file under pages/, encoding namespace
-// separators as `___` (Logseq's triple-underscore convention).
+// separators as `___` (Logseq's triple-underscore convention). Journal dates
+// map to journals/ in the configured file-name format.
 func (f *logseqFormat) PageFilePath(name string) string {
+	name = f.CanonicalName(name)
+	if t, err := time.Parse("2006-01-02", name); err == nil {
+		return "journals/" + t.Format(f.journalLayout) + ".md"
+	}
 	return "pages/" + strings.ReplaceAll(name, "/", "___") + ".md"
+}
+
+// CanonicalName resolves a journal date written as ISO, as the journal file
+// name, or as the page title to the ISO name journals are indexed under.
+func (f *logseqFormat) CanonicalName(name string) string {
+	for _, layout := range []string{"2006-01-02", f.journalLayout, f.titleLayout} {
+		if layout == "" {
+			continue
+		}
+		if t, err := time.Parse(layout, strings.TrimSpace(name)); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+	return name
 }
 
 // NewPageContent renders page properties as a leading pre-block of bare
@@ -169,23 +192,59 @@ func (f *logseqFormat) RenderChild(parentLine, childContent, uuid string) string
 // renderLogseqBlock renders content as an outliner block at the given tab depth.
 // The first line gets the `- ` bullet; continuation lines and the `id::`
 // property align two spaces under the bullet text (matching Logseq's layout).
+// Indented `- ` lines in content are nested child bullets: they keep their
+// relative nesting (a tab or two spaces per level) under the block, after its
+// `id::` line so the id stays with the parent.
 func renderLogseqBlock(content, uuid string, depth int) string {
 	tab := strings.Repeat("\t", depth)
 	cont := tab + "  "
+	lines := strings.Split(content, "\n")
+	own := len(lines)
+	for i := 1; i < len(lines); i++ {
+		if _, ok := nestedBullet(lines[i]); ok {
+			own = i
+			break
+		}
+	}
 	var b strings.Builder
 	if content == "" {
 		b.WriteString(tab + "-")
 	} else {
-		lines := strings.Split(content, "\n")
 		b.WriteString(tab + "- " + lines[0])
-		for _, l := range lines[1:] {
+		for _, l := range lines[1:own] {
 			b.WriteString("\n" + cont + l)
 		}
 	}
 	if uuid != "" {
 		b.WriteString("\n" + cont + "id:: " + uuid)
 	}
+	// A bare `- ` at column 0 still means "child", so shift every level by one.
+	shift := 0
+	if own < len(lines) {
+		if lvl, _ := nestedBullet(lines[own]); lvl == 0 {
+			shift = 1
+		}
+	}
+	for _, l := range lines[own:] {
+		lvl, ok := nestedBullet(l)
+		if !ok {
+			b.WriteString("\n" + tab + l) // a child's own continuation line, already indented
+			continue
+		}
+		b.WriteString("\n" + tab + strings.Repeat("\t", lvl+shift) + strings.TrimLeft(l, " \t"))
+	}
 	return b.String()
+}
+
+// nestedBullet reports whether line is a `- ` bullet after optional
+// indentation, and its nesting level (one per tab or per two spaces).
+func nestedBullet(line string) (level int, ok bool) {
+	rest := strings.TrimLeft(line, " \t")
+	if rest != "-" && !strings.HasPrefix(rest, "- ") {
+		return 0, false
+	}
+	indent := line[:len(line)-len(rest)]
+	return strings.Count(indent, "\t") + strings.Count(indent, " ")/2, true
 }
 
 // SplitLeadingProperties peels off a file's leading page-property pre-block
@@ -273,7 +332,7 @@ func splitPageProperties(lines []string) (props map[string]any, order []string, 
 // races slice reallocation.
 type lsNode struct {
 	depth    int
-	lineNo   int // absolute file line index, for deterministic UUID fallback
+	seed     string // deterministic UUID fallback seed (see logseqFallbackUUID)
 	rawLines []string
 	children []*lsNode
 }
@@ -283,6 +342,7 @@ type lsNode struct {
 func parseLogseqBlocks(relPath string, lines []string, lineOffset int) []types.BlockEntity {
 	var roots []*lsNode
 	var stack []*lsNode
+	seen := map[string]int{} // bullet text -> occurrences so far
 
 	for i, line := range lines {
 		line = strings.TrimRight(line, "\r")
@@ -290,7 +350,8 @@ func parseLogseqBlocks(relPath string, lines []string, lineOffset int) []types.B
 		depth, isBullet, rest := bulletInfo(line)
 
 		if isBullet {
-			node := &lsNode{depth: depth, lineNo: abs, rawLines: []string{rest}}
+			node := &lsNode{depth: depth, seed: logseqFallbackUUID(relPath, rest, seen[rest]), rawLines: []string{rest}}
+			seen[rest]++
 			for len(stack) > 0 && stack[len(stack)-1].depth >= depth {
 				stack = stack[:len(stack)-1]
 			}
@@ -310,7 +371,7 @@ func parseLogseqBlocks(relPath string, lines []string, lineOffset int) []types.B
 		}
 		if len(stack) == 0 {
 			// Freeform text with no bullet: start an implicit root block.
-			node := &lsNode{depth: 0, lineNo: abs}
+			node := &lsNode{depth: 0, seed: deterministicUUID(relPath, abs)}
 			roots = append(roots, node)
 			stack = append(stack, node)
 		}
@@ -326,6 +387,14 @@ func parseLogseqBlocks(relPath string, lines []string, lineOffset int) []types.B
 		return nil
 	}
 	return out
+}
+
+// logseqFallbackUUID is the UUID of a bullet with no `id::`: seeded by its
+// text and how many earlier bullets in the file share that text, not by line
+// number, so an `id::` line or block added elsewhere doesn't shift it onto
+// another block. findBlockLine inverts it to tell duplicates apart.
+func logseqFallbackUUID(relPath, text string, nth int) string {
+	return deterministicUUID(relPath+"\x00"+text, nth)
 }
 
 // deindentContinuation strips a continuation line's alignment: up to depth tabs
@@ -391,8 +460,8 @@ func (f *logseqFormat) ChildInsertOffset(fileStr string, contentEnd int, parentL
 }
 
 // BlockStart locates a bullet by its first content line (see findBlockLine).
-func (f *logseqFormat) BlockStart(lines []string, content, uuid string) int {
-	return findBlockLine(lines, content, uuid)
+func (f *logseqFormat) BlockStart(lines []string, relPath, content, uuid string) int {
+	return findBlockLine(lines, relPath, content, uuid)
 }
 
 // BlockEnd spans the bullet's property lines and children (see blockLineSpan).
@@ -462,7 +531,7 @@ func finalizeNode(relPath string, n *lsNode) types.BlockEntity {
 	}
 
 	if uuid == "" {
-		uuid = deterministicUUID(relPath, n.lineNo)
+		uuid = n.seed
 	}
 
 	block := types.BlockEntity{
@@ -479,17 +548,21 @@ func finalizeNode(relPath string, n *lsNode) types.BlockEntity {
 	return block
 }
 
-// journalFormatPattern extracts :journal/file-name-format from config.edn.
-var journalFormatPattern = regexp.MustCompile(`:journal/file-name-format\s+"([^"]+)"`)
+// journalFormatPattern / journalTitlePattern extract the journal file-name and
+// page-title formats from config.edn.
+var (
+	journalFormatPattern = regexp.MustCompile(`:journal/file-name-format\s+"([^"]+)"`)
+	journalTitlePattern  = regexp.MustCompile(`:journal/page-title-format\s+"([^"]+)"`)
+)
 
-// readJournalLayout reads logseq/config.edn under vaultPath and returns a Go
-// time layout for the journal file-name format, or "" if unavailable.
-func readJournalLayout(vaultPath string) string {
+// readConfigLayout reads logseq/config.edn under vaultPath and returns a Go
+// time layout for the date format pattern captures, or "" if unavailable.
+func readConfigLayout(vaultPath string, pattern *regexp.Regexp) string {
 	data, err := os.ReadFile(filepath.Join(vaultPath, "logseq", "config.edn"))
 	if err != nil {
 		return ""
 	}
-	m := journalFormatPattern.FindSubmatch(data)
+	m := pattern.FindSubmatch(data)
 	if m == nil {
 		return ""
 	}
